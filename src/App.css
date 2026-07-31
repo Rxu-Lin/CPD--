@@ -355,18 +355,46 @@
 }
 
 .canvas-welcome-title {
+  display: inline-block;
   max-width: min(720px, calc(100vw - 64px));
+  margin: 0;
+  overflow: hidden;
   color: rgba(214, 221, 228, 0.68);
   font-size: clamp(24px, 2vw, 34px);
   font-weight: 520;
   letter-spacing: 0.025em;
   line-height: 1.25;
+  text-align: center;
   text-wrap: balance;
+  overflow-wrap: break-word;
+  white-space: normal;
   text-shadow: 0 1px 20px rgba(255, 255, 255, 0.035);
 }
 
-.canvas-welcome-title .split-char {
+.canvas-welcome-char {
   display: inline-block;
+  opacity: 0;
+  filter: blur(6px);
+  transform: translateY(22px);
+  animation: canvas-welcome-character-in 0.9s cubic-bezier(0.165, 0.84, 0.44, 1) forwards;
+  will-change: transform, opacity, filter;
+}
+
+@keyframes canvas-welcome-character-in {
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-welcome-char {
+    opacity: 1;
+    filter: none;
+    transform: none;
+    animation: none;
+  }
 }
 
 .canvas-context-menu {

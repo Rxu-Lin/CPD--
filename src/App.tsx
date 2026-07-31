@@ -54,7 +54,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } f
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
-import SplitText from './SplitText'
 import SpecularButton from './SpecularButton'
 import './App.css'
 import {
@@ -333,6 +332,11 @@ function getReferenceImageRatio(width: number, height: number) {
     Math.abs(option.value - ratio) < Math.abs(closest.value - ratio) ? option : closest,
   ).label
 }
+
+const welcomeTitles = [
+  '你好，欢迎来到JUG无限画布',
+  'CPD专属开发，尽情发挥你的创意',
+] as const
 
 const starterPrompt =
   '一张未来感产品海报，深色背景，蓝色霓虹边缘光，主体是一台半透明的智能设备，电影级布光，高细节'
@@ -1426,6 +1430,7 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false)
   const [, setToast] = useState('已准备好，默认使用本地模拟生成。')
   const [welcomeDismissed, setWelcomeDismissed] = useState(false)
+  const [welcomeTitleIndex, setWelcomeTitleIndex] = useState(0)
 
   const markDirty = useCallback(() => setDirty(true), [])
 
@@ -1436,6 +1441,16 @@ export default function App() {
   useEffect(() => {
     if (nodes.length > 0) setWelcomeDismissed(true)
   }, [nodes.length])
+
+  useEffect(() => {
+    if (welcomeDismissed || nodes.length > 0) return
+
+    const interval = window.setInterval(() => {
+      setWelcomeTitleIndex((current) => (current + 1) % welcomeTitles.length)
+    }, 8000)
+
+    return () => window.clearInterval(interval)
+  }, [nodes.length, welcomeDismissed])
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<WorkflowNode>[]) => {
@@ -2736,7 +2751,7 @@ export default function App() {
               style: { stroke: workflowEdgeColor, strokeWidth: 1.5 },
             }}
           >
-            <Background color="#435365" gap={26} size={1.2} />
+            <Background color="rgba(255, 255, 255, 0.24)" gap={26} size={1.35} />
             <Controls showInteractive={false} />
           </ReactFlow>
           {selectedCanvasNodes.length > 0 && !groupDialog && (
@@ -2770,17 +2785,17 @@ export default function App() {
           )}
           {!welcomeDismissed && nodes.length === 0 && (
             <div className="canvas-welcome" aria-hidden="true">
-              <SplitText
-                tag="h2"
-                text="你好，欢迎来到JUG无限画布"
-                className="canvas-welcome-title"
-                delay={58}
-                duration={0.9}
-                ease="power3.out"
-                splitType="chars"
-                from={{ opacity: 0, y: 22, filter: 'blur(6px)' }}
-                to={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-              />
+              <h2 key={welcomeTitleIndex} className="canvas-welcome-title">
+                {Array.from(welcomeTitles[welcomeTitleIndex]).map((character, index) => (
+                  <span
+                    className="canvas-welcome-char"
+                    style={{ animationDelay: `${index * 58}ms` }}
+                    key={`${character}-${index}`}
+                  >
+                    {character}
+                  </span>
+                ))}
+              </h2>
             </div>
           )}
           {contextMenu && (

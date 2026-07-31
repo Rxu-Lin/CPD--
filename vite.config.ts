@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin, type ViteDevServer } from 'vite'
 import react from '@vitejs/plugin-react'
+import { ZipArchive, type ArchiverError } from 'archiver'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
@@ -415,11 +416,32 @@ function runPowerShellArchive(script: string, sourcePath: string, destinationPat
 
 async function compressProjectDirectory(sourceDir: string, destinationZip: string) {
   await unlink(destinationZip).catch(() => undefined)
-  await runPowerShellArchive(
-    `Compress-Archive -Path (Join-Path $env:AI_CANVAS_SOURCE_PATH '*') -DestinationPath $env:AI_CANVAS_DESTINATION_PATH -CompressionLevel Optimal -Force`,
-    sourceDir,
-    destinationZip,
-  )
+  await new Promise<void>((resolve, reject) => {
+    const output = createWriteStream(destinationZip)
+    const archive = new ZipArchive({ zlib: { level: 9 } })
+    let settled = false
+
+    const finish = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+
+    output.on('close', finish)
+    output.on('error', fail)
+    archive.on('warning', (error: ArchiverError) => {
+      if (error.code !== 'ENOENT') fail(error)
+    })
+    archive.on('error', fail)
+    archive.pipe(output)
+    archive.directory(sourceDir, false)
+    void archive.finalize().catch(fail)
+  })
 }
 
 async function extractProjectArchive(sourceZip: string, destinationDir: string) {
