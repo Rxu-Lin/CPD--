@@ -2,7 +2,7 @@
 
 一个 React + Vite 实现的无限画布 AI 图像生成工作流。界面采用深色节点画布，支持提示词节点、参考图节点、生成结果节点，以及项目导入导出。
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Rxu-Lin/AI-)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Rxu-Lin/CPD--)
 
 ## 启动
 

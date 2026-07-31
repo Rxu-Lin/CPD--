@@ -10,6 +10,12 @@ import { isIP } from 'node:net'
 import path from 'node:path'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import {
+  defaultGrsAiModel,
+  findGrsAiModel,
+  normalizeGrsAiEndpoint,
+  normalizeGrsAiModel,
+} from './src/grsaiModels.js'
 
 const generatedImagesDir = path.resolve(process.cwd(), 'generated-images')
 const exportTempDir = path.resolve(process.cwd(), '.tmp-exports')
@@ -30,13 +36,6 @@ type ApiConfig = {
   bodyTemplate: string
   responsePath: string
 }
-
-const grsAiDefaultEndpoint = 'https://grsai.dakka.com.cn/v1/draw/completions'
-const grsAiModels = [
-  { label: 'GPT-image-2', value: 'gpt-image-2', endpoint: '/v1/draw/completions' },
-  { label: 'Nano-banana-2', value: 'nano-banana-2', endpoint: '/v1/draw/nano-banana' },
-]
-const defaultGrsAiModel = grsAiModels[0].value
 
 function readBody(req: IncomingMessage) {
   return new Promise<string>((resolve, reject) => {
@@ -628,22 +627,12 @@ function gptImageSizeFromSize(size: string) {
   return map[ratio] || size || '1024x1024'
 }
 
-function normalizeGrsAiEndpoint(endpoint: string, model: string) {
-  const value = endpoint.trim() || grsAiDefaultEndpoint
-  const modelConfig = grsAiModels.find((item) => item.value === normalizeGrsAiModel(model)) ?? grsAiModels[0]
-  if (value.includes('/v1/draw/')) return value.replace(/\/v1\/draw\/[^/]+$/, modelConfig.endpoint)
-  if (value.endsWith('/v1')) return `${value.replace(/\/$/, '')}${modelConfig.endpoint.replace('/v1', '')}`
-  return `${value.replace(/\/$/, '')}${modelConfig.endpoint}`
-}
-
-function grsAiResultEndpoint(completionsEndpoint: string) {
-  return completionsEndpoint.replace(/\/v1\/draw\/[^/?]+(?=\?|$)/, '/v1/draw/result')
-}
-
-function normalizeGrsAiModel(model: string) {
-  const value = model.trim().toLowerCase()
-  const match = grsAiModels.find((item) => item.value === value || item.label.toLowerCase() === value)
-  return match?.value ?? defaultGrsAiModel
+function grsAiResultEndpoint(generationEndpoint: string, taskId: string) {
+  const url = new URL(generationEndpoint)
+  url.pathname = '/v1/api/result'
+  url.search = ''
+  url.searchParams.set('id', taskId)
+  return url.toString()
 }
 
 function grsAiDataCandidates(source: unknown) {
@@ -827,6 +816,33 @@ async function postJson(endpoint: string, headers: Record<string, string>, paylo
   return json
 }
 
+async function getJson(endpoint: string, headers: Record<string, string>) {
+  let response: Response
+  try {
+    response = await fetch(await validateUpstreamEndpoint(endpoint), {
+      method: 'GET',
+      headers,
+    })
+  } catch (error) {
+    throw new Error(formatUpstreamFetchError(error, endpoint))
+  }
+
+  const text = await response.text()
+  const json = parseJsonLikeResponse(text)
+
+  if (!response.ok) {
+    const source = json && typeof json === 'object' ? (json as Record<string, unknown>) : {}
+    const error = source.error && typeof source.error === 'object' ? (source.error as Record<string, unknown>) : null
+    const message =
+      (typeof error?.message === 'string' && error.message) ||
+      (typeof source.message === 'string' && source.message) ||
+      `Request failed: ${response.status} ${response.statusText}`
+    throw new Error(message)
+  }
+
+  return json
+}
+
 function shouldInlineGrsAiReference(imageUrl: string) {
   if (imageUrl.startsWith('data:image/')) return false
   if (imageUrl.startsWith('/')) return true
@@ -850,21 +866,19 @@ async function prepareGrsAiReferenceImages(imageUrls: string[]) {
 
 async function requestGrsAiImage(config: ApiConfig, prompt: string, referenceImageUrls: string[] = []) {
   const model = normalizeGrsAiModel(config.model)
-  const endpoint = normalizeGrsAiEndpoint(config.endpoint, model)
+  const modelConfig = findGrsAiModel(model) ?? findGrsAiModel(defaultGrsAiModel)
+  const endpoint = normalizeGrsAiEndpoint(config.endpoint)
   const headers: Record<string, string> = config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}
   const payload: Record<string, unknown> = {
     model,
     prompt,
-    aspectRatio: model === 'gpt-image-2' ? gptImageSizeFromSize(config.size) : aspectRatioFromSize(config.size),
-    webHook: '-1',
+    images: await prepareGrsAiReferenceImages(referenceImageUrls),
+    aspectRatio: modelConfig?.family === 'gpt-image' ? gptImageSizeFromSize(config.size) : aspectRatioFromSize(config.size),
+    replyType: 'json',
   }
 
-  if (model !== 'gpt-image-2') {
-    payload.imageSize = '1K'
-  }
-
-  if (referenceImageUrls.length) {
-    payload.urls = await prepareGrsAiReferenceImages(referenceImageUrls)
+  if (modelConfig?.family === 'nano-banana') {
+    payload.imageSize = modelConfig.imageSize
   }
 
   const created = await postJson(endpoint, headers, payload)
@@ -880,10 +894,9 @@ async function requestGrsAiImage(config: ApiConfig, prompt: string, referenceIma
   const taskId = grsAiTaskId(created)
   if (!taskId) throw new Error(`GrsAI returned no image URL. Response: ${compactJson(created)}`)
 
-  const resultEndpoint = grsAiResultEndpoint(endpoint)
   for (let index = 0; index < 30; index += 1) {
     await new Promise((resolve) => setTimeout(resolve, 3000))
-    const result = await postJson(resultEndpoint, headers, { id: taskId })
+    const result = await getJson(grsAiResultEndpoint(endpoint, taskId), headers)
     const resultFailure = grsAiFailureMessage(result)
     if (resultFailure) throw new Error(resultFailure)
 

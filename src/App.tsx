@@ -1,16 +1,23 @@
 import {
   addEdge,
+  applyEdgeChanges,
   Background,
+  BaseEdge,
   Controls,
+  getBezierPath,
   Handle,
   MarkerType,
   Position,
   ReactFlow,
+  SelectionMode,
   useEdgesState,
   useNodesState,
+  useUpdateNodeInternals,
   type Connection,
   type Edge,
   type EdgeChange,
+  type EdgeProps,
+  type EdgeTypes,
   type OnConnectEnd,
   type OnConnectStart,
   type Node,
@@ -28,28 +35,38 @@ import {
   CheckCircle2,
   Copy,
   Download,
-  FilePlus2,
   FolderOpen,
+  Group as GroupIcon,
   History,
   Image as ImageIcon,
   KeyRound,
   Loader2,
-  Save,
+  Pencil,
+  RefreshCw,
   Settings,
-  Sparkles,
   Trash2,
   Upload,
   UploadCloud,
   Wand2,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
+import SplitText from './SplitText'
+import SpecularButton from './SpecularButton'
 import './App.css'
+import {
+  defaultGrsAiModel,
+  findGrsAiModel,
+  grsAiDefaultEndpoint,
+  grsAiModelGroups,
+  normalizeGrsAiEndpoint,
+  normalizeGrsAiModel,
+} from './grsaiModels'
 
-type NodeKind = 'prompt' | 'image' | 'reference' | 'repaint'
+type NodeKind = 'prompt' | 'image' | 'reference' | 'repaint' | 'group'
 type NodeStatus = 'idle' | 'generating' | 'done' | 'error'
 type RepaintBrushColor = 'red' | 'blue'
 type PromptLibraryItem = {
@@ -142,6 +159,12 @@ type GenerationRecord = {
   status: '成功' | '失败'
 }
 
+type ImageInputSlot = {
+  id: string
+  index: number
+  connected: boolean
+}
+
 type WorkflowNodeData = {
   kind: NodeKind
   title: string
@@ -157,9 +180,15 @@ type WorkflowNodeData = {
   sourceName?: string
   error?: string
   createdAt: string
+  promptInputConnected?: boolean
+  imageInputConnected?: boolean
+  imageInputSlots?: ImageInputSlot[]
+  outputConnected?: boolean
+  memberCount?: number
   onDelete?: (id: string) => void
   onDownload?: (id: string) => void
   onRevealImage?: (id: string) => void
+  onReplaceImage?: (id: string, file: File) => void
   onGenerate?: (id: string) => void
   onChangeSize?: (id: string, size: string) => void
   onChangePrompt?: (id: string, prompt: string) => void
@@ -168,9 +197,67 @@ type WorkflowNodeData = {
   onChangeBrushColor?: (id: string, brushColor: RepaintBrushColor) => void
   onClearMask?: (id: string) => void
   onUsePrompt?: (prompt: string) => void
+  onRenameGroup?: (id: string) => void
 }
 
 type WorkflowNode = Node<WorkflowNodeData, 'workflow'>
+type WorkflowEdgeData = Record<string, unknown> & {
+  onDisconnect?: (edgeId: string) => void
+}
+type WorkflowEdge = Edge<WorkflowEdgeData, 'disconnectible'>
+
+const imageInputHandlePrefix = 'image-'
+
+function imageInputHandleIndex(handleId?: string | null) {
+  if (handleId === 'image') return 1
+  if (!handleId?.startsWith(imageInputHandlePrefix)) return null
+  const index = Number(handleId.slice(imageInputHandlePrefix.length))
+  return Number.isInteger(index) && index > 0 ? index : null
+}
+
+function isImageInputHandle(handleId?: string | null) {
+  return imageInputHandleIndex(handleId) !== null
+}
+
+function normalizeImageInputEdges(edgeValues: Edge[], nodeValues: WorkflowNode[]) {
+  const imageTargetIds = nodeValues.filter((node) => node.data.kind === 'image').map((node) => node.id)
+  const sourceKindById = new Map(nodeValues.map((node) => [node.id, node.data.kind]))
+  const normalizedEdges = edgeValues.map((edge) => ({ ...edge }))
+  let changed = false
+
+  for (const targetId of imageTargetIds) {
+    const imageEdges = normalizedEdges
+      .map((edge, position) => ({ edge, position, handleIndex: imageInputHandleIndex(edge.targetHandle) }))
+      .filter(
+        ({ edge, handleIndex }) =>
+          edge.target === targetId &&
+          (handleIndex !== null || (!edge.targetHandle && sourceKindById.get(edge.source) !== 'prompt')),
+      )
+      .sort((left, right) => {
+        if (left.handleIndex !== null && right.handleIndex !== null && left.handleIndex !== right.handleIndex) {
+          return left.handleIndex - right.handleIndex
+        }
+        if (left.handleIndex !== null && right.handleIndex === null) return -1
+        if (left.handleIndex === null && right.handleIndex !== null) return 1
+        return left.position - right.position
+      })
+
+    imageEdges.forEach(({ edge, position }, index) => {
+      const targetHandle = `${imageInputHandlePrefix}${index + 1}`
+      if (edge.targetHandle === targetHandle) return
+      normalizedEdges[position] = { ...edge, targetHandle }
+      changed = true
+    })
+  }
+
+  return changed ? normalizedEdges : edgeValues
+}
+
+function promptWithReferenceImageOrder(prompt: string, referenceImageCount: number) {
+  if (referenceImageCount <= 1) return prompt
+  const labels = Array.from({ length: referenceImageCount }, (_, index) => `Image ${index + 1}`).join('、')
+  return `${prompt}\n\n参考图顺序说明：参考图已按画布端口编号依次传入（${labels}）。请严格按该编号理解图片；提示词提到 Image N 时，对应同名编号的参考图。`
+}
 
 type ProjectFile = {
   version: 1 | 2
@@ -186,8 +273,12 @@ type CanvasContextMenu = {
   flowPosition: XYPosition
 }
 
-const PROJECT_STORAGE_KEY = 'node-banana-local-project'
+type GroupDialogState =
+  | { mode: 'create'; nodeIds: string[] }
+  | { mode: 'rename'; groupId: string }
+
 const API_STORAGE_KEY = 'node-banana-api-config'
+const workflowEdgeColor = 'rgba(255, 255, 255, 0.88)'
 
 const defaultApiConfig: ApiConfig = {
   mode: 'mock',
@@ -199,20 +290,9 @@ const defaultApiConfig: ApiConfig = {
   responsePath: 'data.0.url',
 }
 
-const grsAiModelOptions = [
-  { label: 'GPT-image-2', value: 'gpt-image-2' },
-  { label: 'Nano-banana-2', value: 'nano-banana-2' },
-]
-const defaultGrsAiModel = grsAiModelOptions[0].value
-
-function normalizeGrsAiModel(model: string) {
-  const value = model.trim().toLowerCase()
-  return grsAiModelOptions.find((item) => item.value === value || item.label.toLowerCase() === value)?.value ?? defaultGrsAiModel
-}
-
 const grsAiApiConfig: Partial<ApiConfig> = {
   mode: 'grsai',
-  endpoint: 'https://grsai.dakka.com.cn/v1/draw/completions',
+  endpoint: grsAiDefaultEndpoint,
   model: defaultGrsAiModel,
   responsePath: 'data.0.url',
 }
@@ -234,6 +314,26 @@ const aspectRatioOptions: Array<{
 
 const defaultAspectRatioOption = aspectRatioOptions.find((option) => option.value === '1:1') ?? aspectRatioOptions[0]
 
+const referenceImageRatios = [
+  { label: '16:9', value: 16 / 9 },
+  { label: '3:2', value: 3 / 2 },
+  { label: '4:3', value: 4 / 3 },
+  { label: '6:5', value: 6 / 5 },
+  { label: '1:1', value: 1 },
+  { label: '5:6', value: 5 / 6 },
+  { label: '3:4', value: 3 / 4 },
+  { label: '2:3', value: 2 / 3 },
+  { label: '9:16', value: 9 / 16 },
+]
+
+function getReferenceImageRatio(width: number, height: number) {
+  if (!width || !height) return '—'
+  const ratio = width / height
+  return referenceImageRatios.reduce((closest, option) =>
+    Math.abs(option.value - ratio) < Math.abs(closest.value - ratio) ? option : closest,
+  ).label
+}
+
 const starterPrompt =
   '一张未来感产品海报，深色背景，蓝色霓虹边缘光，主体是一台半透明的智能设备，电影级布光，高细节'
 
@@ -241,12 +341,68 @@ function id(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+function collectNodeFamilyIds(nodeIds: string[], nodeValues: WorkflowNode[]) {
+  const ids = new Set(nodeIds.filter(Boolean))
+  let changed = true
+
+  while (changed) {
+    changed = false
+    nodeValues.forEach((node) => {
+      if (node.parentId && ids.has(node.parentId) && !ids.has(node.id)) {
+        ids.add(node.id)
+        changed = true
+      }
+    })
+  }
+
+  return ids
+}
+
+function numericNodeDimension(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return 0
+}
+
+function getWorkflowNodeSize(node: WorkflowNode) {
+  const fallbackWidth = node.data.kind === 'repaint' ? 360 : node.data.kind === 'image' || node.data.kind === 'prompt' ? 330 : 312
+  const fallbackHeight = node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' ? 480 : node.data.kind === 'reference' ? 360 : 250
+  return {
+    width: node.measured?.width || node.width || numericNodeDimension(node.style?.width) || fallbackWidth,
+    height: node.measured?.height || node.height || numericNodeDimension(node.style?.height) || fallbackHeight,
+  }
+}
+
+function getAbsoluteNodePosition(node: WorkflowNode, nodeValues: WorkflowNode[]) {
+  const position = { ...node.position }
+  let parentId = node.parentId
+  const visited = new Set<string>()
+
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId)
+    const parent = nodeValues.find((item) => item.id === parentId)
+    if (!parent) break
+    position.x += parent.position.x
+    position.y += parent.position.y
+    parentId = parent.parentId
+  }
+
+  return position
+}
+
 function readStoredApiConfig() {
   try {
     const saved = window.localStorage.getItem(API_STORAGE_KEY)
     const config = saved ? { ...defaultApiConfig, ...JSON.parse(saved) } : defaultApiConfig
     if (config.mode === 'grsai') {
-      return { ...config, model: normalizeGrsAiModel(config.model) }
+      return {
+        ...config,
+        endpoint: normalizeGrsAiEndpoint(config.endpoint),
+        model: normalizeGrsAiModel(config.model),
+      }
     }
     return config.apiKey?.trim() && config.mode === 'mock' ? { ...config, mode: 'openai' as const } : config
   } catch {
@@ -259,6 +415,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onDelete,
     onDownload,
     onRevealImage,
+    onReplaceImage,
     onGenerate,
     onChangeSize,
     onChangePrompt,
@@ -267,11 +424,14 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onChangeBrushColor,
     onClearMask,
     onUsePrompt,
+    onRenameGroup,
+    memberCount,
     ...data
   } = node.data
   void onDelete
   void onDownload
   void onRevealImage
+  void onReplaceImage
   void onGenerate
   void onChangeSize
   void onChangePrompt
@@ -280,6 +440,8 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onChangeBrushColor
   void onClearMask
   void onUsePrompt
+  void onRenameGroup
+  void memberCount
   const transientNode = node as WorkflowNode & { resizing?: boolean }
   const { measured, selected, dragging, resizing, ...stableNode } = transientNode
   void measured
@@ -805,25 +967,124 @@ function RepaintMaskEditor({
 }
 
 function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
+  const updateNodeInternals = useUpdateNodeInternals()
+  const replaceImageInputRef = useRef<HTMLInputElement>(null)
+  const isPromptComposingRef = useRef(false)
+  const lastCommittedPromptRef = useRef(data.prompt || '')
+  const [promptDraft, setPromptDraft] = useState(data.prompt || '')
+  const [referenceImageRatio, setReferenceImageRatio] = useState('—')
+  const [referencePixelSize, setReferencePixelSize] = useState('')
   const isImage = data.kind === 'image'
   const isPrompt = data.kind === 'prompt'
   const isReference = data.kind === 'reference'
   const isRepaint = data.kind === 'repaint'
+  const isGroup = data.kind === 'group'
   const isGenerating = data.status === 'generating'
   const isDone = data.status === 'done'
   const isError = data.status === 'error'
   const selectedAspectRatio = getAspectRatioOption(data.size)
-  const selectedAspectRatioIndex = Math.max(
-    0,
-    aspectRatioOptions.findIndex((option) => option.size === selectedAspectRatio.size),
-  )
-  const aspectRatioProgress = (selectedAspectRatioIndex / (aspectRatioOptions.length - 1)) * 100
   const brushSize = data.brushSize || 36
   const brushColor = data.brushColor || 'red'
+  const configuredModelName = data.model?.trim() || ''
+  const nodeTitle = isReference
+    ? (data.sourceName || data.title)
+    : isImage
+      ? (findGrsAiModel(configuredModelName)?.label || configuredModelName || data.title)
+      : data.title
+  const imageInputSlots = isImage
+    ? data.imageInputSlots?.length
+      ? data.imageInputSlots
+      : [{ id: `${imageInputHandlePrefix}1`, index: 1, connected: false }]
+    : [{ id: 'image', index: 1, connected: Boolean(data.imageInputConnected) }]
+  const totalInputSlots = 1 + imageInputSlots.length
+  const inputPortSpan = Math.min(60, (totalInputSlots - 1) * 12)
+  const inputPortStep = totalInputSlots > 1 ? inputPortSpan / (totalInputSlots - 1) : 0
+  const inputPortTop = (rowIndex: number) => `${50 - inputPortSpan / 2 + inputPortStep * rowIndex}%`
+  const imageSlotSignature = imageInputSlots.map((slot) => `${slot.id}:${slot.connected}`).join('|')
+
+  useEffect(() => {
+    updateNodeInternals(nodeId)
+  }, [imageSlotSignature, nodeId, updateNodeInternals])
+
+  useEffect(() => {
+    if (!isReference) return
+    setReferenceImageRatio('—')
+    setReferencePixelSize('')
+  }, [data.imageUrl, isReference])
+
+  useEffect(() => {
+    const nextPrompt = data.prompt || ''
+    lastCommittedPromptRef.current = nextPrompt
+    if (!isPromptComposingRef.current) setPromptDraft(nextPrompt)
+  }, [data.prompt])
+
+  const commitPromptDraft = (nextPrompt: string) => {
+    if (lastCommittedPromptRef.current === nextPrompt) return
+    lastCommittedPromptRef.current = nextPrompt
+    data.onChangePrompt?.(nodeId, nextPrompt)
+  }
+
+  if (isGroup) {
+    return (
+      <div className={`workflow-group ${selected ? 'selected' : ''}`}>
+        <div className="workflow-group-head">
+          <GroupIcon size={15} />
+          <span className="workflow-group-name" title={data.title}>{data.title}</span>
+          <small>{data.memberCount ?? 0} 个节点</small>
+          <div className="workflow-group-actions nodrag nopan">
+            <button type="button" title="重命名分组" aria-label="重命名分组" onClick={() => data.onRenameGroup?.(nodeId)}>
+              <Pencil size={13} />
+            </button>
+            <button type="button" title="删除整个分组" aria-label="删除整个分组" onClick={() => data.onDelete?.(nodeId)}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={`workflow-node ${selected ? 'selected' : ''} ${data.kind}`}>
-      <Handle type="target" position={Position.Left} className="node-handle" />
+      {(isImage || isRepaint) && (
+        <>
+          <span className="node-port-label prompt-input-label" style={{ top: inputPortTop(0) }} aria-hidden="true">
+            <Wand2 size={13} />
+            Prompt
+          </span>
+          <Handle
+            id="prompt"
+            type="target"
+            position={Position.Left}
+            className={`node-handle prompt-input-handle ${data.promptInputConnected ? 'connected' : ''}`}
+            style={{ top: inputPortTop(0) }}
+            isConnectable={!data.promptInputConnected}
+            aria-label="Prompt 输入"
+            title="连接提示词节点"
+          />
+          {imageInputSlots.map((slot, index) => {
+            const label = isImage ? `Image ${slot.index}` : 'Image'
+            const top = inputPortTop(index + 1)
+            return [
+              <span key={`${slot.id}-label`} className="node-port-label image-input-label" style={{ top }} aria-hidden="true">
+                <ImageIcon size={13} />
+                {label}
+              </span>,
+              <Handle
+                key={slot.id}
+                id={slot.id}
+                type="target"
+                position={Position.Left}
+                className={`node-handle image-input-handle ${slot.connected ? 'connected' : ''}`}
+                style={{ top }}
+                isConnectable={!slot.connected}
+                aria-label={`${label} 输入`}
+                title={`连接到 ${label}`}
+              />,
+            ]
+          })}
+        </>
+      )}
       <div className="node-head">
         <div className="node-title">
           {isRepaint ? (
@@ -835,24 +1096,63 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           ) : (
             <Wand2 size={15} />
           )}
-          <span>{data.title}</span>
+          <span
+            className={isReference ? 'reference-file-title' : undefined}
+            title={(isReference || isImage) ? nodeTitle : undefined}
+          >
+            {nodeTitle}
+          </span>
         </div>
-        <div className={`node-status ${data.status}`}>
-          {isGenerating && <Loader2 size={13} />}
-          {isDone && <CheckCircle2 size={13} />}
-          {isError && <AlertTriangle size={13} />}
-          <span>{isGenerating ? '生成中' : isDone ? '完成' : isError ? '失败' : '就绪'}</span>
-        </div>
+        {isReference ? (
+          <div
+            className="reference-pixel-ratio"
+            title={referencePixelSize ? `原始像素 ${referencePixelSize}` : '正在读取图片比例'}
+            aria-label={`上传图片比例 ${referenceImageRatio}`}
+          >
+            {referenceImageRatio}
+          </div>
+        ) : (isImage || isRepaint) ? (
+          <button
+            className="node-delete-button nodrag nopan"
+            type="button"
+            title="删除节点"
+            aria-label="删除节点"
+            onClick={() => data.onDelete?.(nodeId)}
+          >
+            <Trash2 size={13} />
+          </button>
+        ) : (
+          <div className={`node-status ${data.status}`}>
+            {isGenerating && <Loader2 size={13} />}
+            {isDone && <CheckCircle2 size={13} />}
+            {isError && <AlertTriangle size={13} />}
+            <span>{isGenerating ? '生成中' : isDone ? '完成' : isError ? '失败' : '就绪'}</span>
+          </div>
+        )}
       </div>
 
       {(isPrompt || isRepaint) ? (
         <label className="image-prompt-control nodrag nopan nowheel">
           <span>提示词</span>
           <textarea
-            value={data.prompt || ''}
+            value={promptDraft}
             rows={isRepaint ? 4 : 5}
             placeholder={isRepaint ? '描述涂抹区域要重绘成什么' : '输入提示词'}
-            onChange={(event) => data.onChangePrompt?.(nodeId, event.target.value)}
+            onCompositionStart={() => {
+              isPromptComposingRef.current = true
+            }}
+            onCompositionEnd={(event) => {
+              isPromptComposingRef.current = false
+              const nextPrompt = event.currentTarget.value
+              setPromptDraft(nextPrompt)
+              commitPromptDraft(nextPrompt)
+            }}
+            onKeyDown={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              const nextPrompt = event.currentTarget.value
+              setPromptDraft(nextPrompt)
+              if (!isPromptComposingRef.current) commitPromptDraft(nextPrompt)
+            }}
           />
         </label>
       ) : (
@@ -864,9 +1164,15 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           <img
             className="node-image"
             src={data.imageUrl}
-            alt={data.title}
+            alt={isReference ? (data.sourceName || data.title) : data.title}
             draggable={false}
             style={isImage ? { aspectRatio: selectedAspectRatio.cssRatio } : undefined}
+            onLoad={(event) => {
+              if (!isReference) return
+              const { naturalWidth, naturalHeight } = event.currentTarget
+              setReferenceImageRatio(getReferenceImageRatio(naturalWidth, naturalHeight))
+              setReferencePixelSize(`${naturalWidth} × ${naturalHeight}`)
+            }}
           />
         ) : (
           <div className="node-empty" style={isImage ? { aspectRatio: selectedAspectRatio.cssRatio } : undefined}>
@@ -929,31 +1235,6 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       {data.error && <div className="node-error">{data.error}</div>}
 
       {(isImage || isRepaint) && (
-        <button
-          className="node-generate-button nodrag nopan"
-          type="button"
-          onClick={() => data.onGenerate?.(nodeId)}
-          disabled={isGenerating}
-        >
-          {isGenerating ? <Loader2 size={15} /> : <Sparkles size={15} />}
-          {isGenerating ? '生成中...' : isRepaint ? (isDone ? '重新重绘' : '重绘生成') : isDone ? '重新生成' : '生成'}
-        </button>
-      )}
-
-      {isReference && (
-        <label className="reference-size-control nodrag nopan">
-          <span>生成比例</span>
-          <select value={data.size || defaultApiConfig.size} onChange={(event) => data.onChangeSize?.(nodeId, event.target.value)}>
-            {aspectRatioOptions.map((option) => (
-              <option key={option.value} value={option.size}>
-                {option.label} · {option.size}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-
-      {(isImage || isRepaint) && (
         <div className="aspect-ratio-control nodrag nopan" aria-label="尺寸比例">
           <div className="aspect-ratio-heading">
             <span>尺寸比例</span>
@@ -962,25 +1243,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               <small>{selectedAspectRatio.size.replace('x', ' × ')}</small>
             </output>
           </div>
-          <div
-            className="aspect-ratio-slider"
-            style={{ '--ratio-progress': `${aspectRatioProgress}%` } as CSSProperties}
-          >
-            <input
-              type="range"
-              min="0"
-              max={aspectRatioOptions.length - 1}
-              step="1"
-              value={selectedAspectRatioIndex}
-              aria-label="选择尺寸比例"
-              aria-valuetext={`${selectedAspectRatio.label}，${selectedAspectRatio.size}`}
-              onPointerDown={(event) => event.stopPropagation()}
-              onKeyDown={(event) => event.stopPropagation()}
-              onChange={(event) => {
-                const option = aspectRatioOptions[Number(event.target.value)]
-                if (option) data.onChangeSize?.(nodeId, option.size)
-              }}
-            />
+          <div className="aspect-ratio-options">
             <div className="aspect-ratio-marks">
               {aspectRatioOptions.map((option) => (
                 <button
@@ -1003,13 +1266,32 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
       {!isPrompt && (
         <>
-          {isReference && (
-            <div className="node-meta">
-              <span>{data.sourceName || '参考图'}</span>
-            </div>
-          )}
-
           <div className="node-actions">
+            {isReference && (
+              <>
+                <input
+                  ref={replaceImageInputRef}
+                  className="node-replace-input nodrag nopan"
+                  type="file"
+                  accept="image/*"
+                  aria-label="替换参考图"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    event.target.value = ''
+                    if (file) data.onReplaceImage?.(nodeId, file)
+                  }}
+                />
+                <button
+                  className="node-replace-button nodrag nopan"
+                  type="button"
+                  title="替换参考图"
+                  onClick={() => replaceImageInputRef.current?.click()}
+                >
+                  <RefreshCw size={13} />
+                  <span>替换</span>
+                </button>
+              </>
+            )}
             {data.imageUrl && (
               <button type="button" title="下载图像" onClick={() => data.onDownload?.(nodeId)}>
                 <Download size={14} />
@@ -1020,16 +1302,31 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 <FolderOpen size={14} />
               </button>
             )}
-            <button type="button" title="删除节点" onClick={() => data.onDelete?.(nodeId)}>
-              <Trash2 size={14} />
-            </button>
+            {(isImage || isRepaint) ? (
+              <button
+                className="node-run-button nodrag nopan"
+                type="button"
+                title={isGenerating ? '正在生成' : isRepaint ? '运行重绘' : '运行生成'}
+                aria-label={isGenerating ? '正在生成' : isRepaint ? '运行重绘' : '运行生成'}
+                onClick={() => data.onGenerate?.(nodeId)}
+                disabled={isGenerating}
+              >
+                Run
+              </button>
+            ) : (
+              <button type="button" title="删除节点" onClick={() => data.onDelete?.(nodeId)}>
+                <Trash2 size={14} />
+              </button>
+            )}
           </div>
         </>
       )}
       <Handle
+        id="output"
         type="source"
         position={Position.Right}
-        className={`node-handle ${isReference ? 'reference-output-handle' : isImage || isRepaint ? 'repaint-output-handle' : ''}`}
+        className={`node-handle output-handle ${data.outputConnected ? 'connected' : ''}`}
+        aria-label={isPrompt ? 'Prompt 输出' : 'Image 输出'}
         title={
           isReference
             ? '向右拖出生成图像框'
@@ -1046,13 +1343,71 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
 const workflowNodeTypes = { workflow: WorkflowCard }
 
+function DisconnectibleEdge({
+  id: edgeId,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  markerEnd,
+  markerStart,
+  style,
+  data,
+}: EdgeProps<WorkflowEdge>) {
+  const [edgePath, labelX, labelY] = getBezierPath({
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourcePosition,
+    targetPosition,
+  })
+  const disconnect = () => data?.onDisconnect?.(edgeId)
+
+  return (
+    <>
+      <BaseEdge
+        id={edgeId}
+        path={edgePath}
+        markerStart={markerStart}
+        markerEnd={markerEnd}
+        style={style}
+        interactionWidth={22}
+      />
+      <g
+        className="edge-disconnect-indicator nodrag nopan"
+        transform={`translate(${labelX} ${labelY})`}
+        role="button"
+        tabIndex={0}
+        aria-label="取消连接"
+        onClick={(event) => {
+          event.stopPropagation()
+          disconnect()
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          disconnect()
+        }}
+      >
+        <circle r="12" />
+        <X className="edge-disconnect-x" x={-7} y={-7} width={14} height={14} strokeWidth={3.6} aria-hidden="true" />
+      </g>
+    </>
+  )
+}
+
+const workflowEdgeTypes = { disconnectible: DisconnectibleEdge } satisfies EdgeTypes
+
 export default function App() {
   const importInputRef = useRef<HTMLInputElement>(null)
   const referenceInputRef = useRef<HTMLInputElement>(null)
   const pendingNodePositionRef = useRef<XYPosition | null>(null)
   const connectingFromNodeIdRef = useRef<string | null>(null)
   const [nodes, setNodes, onNodesChange] = useNodesState<WorkflowNode>([])
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
+  const [edges, setEdges] = useEdgesState<Edge>([])
   const [, setPrompt] = useState(starterPrompt)
   const [projectName, setProjectName] = useState('未命名项目')
   const [dirty, setDirty] = useState(false)
@@ -1064,12 +1419,23 @@ export default function App() {
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null)
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<WorkflowNode, Edge> | null>(null)
   const [contextMenu, setContextMenu] = useState<CanvasContextMenu | null>(null)
+  const [groupDialog, setGroupDialog] = useState<GroupDialogState | null>(null)
+  const [groupNameDraft, setGroupNameDraft] = useState('')
   const [apiConfig, setApiConfig] = useState<ApiConfig>(() => readStoredApiConfig())
   const [history, setHistory] = useState<GenerationRecord[]>([])
   const [isExporting, setIsExporting] = useState(false)
   const [, setToast] = useState('已准备好，默认使用本地模拟生成。')
+  const [welcomeDismissed, setWelcomeDismissed] = useState(false)
 
   const markDirty = useCallback(() => setDirty(true), [])
+
+  useEffect(() => {
+    setEdges((current) => normalizeImageInputEdges(current, nodes))
+  }, [nodes, setEdges])
+
+  useEffect(() => {
+    if (nodes.length > 0) setWelcomeDismissed(true)
+  }, [nodes.length])
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<WorkflowNode>[]) => {
@@ -1081,28 +1447,44 @@ export default function App() {
 
   const handleEdgesChange = useCallback(
     (changes: EdgeChange<Edge>[]) => {
-      onEdgesChange(changes)
+      setEdges((current) => normalizeImageInputEdges(applyEdgeChanges(changes, current), nodes))
       markDirty()
     },
-    [markDirty, onEdgesChange],
+    [markDirty, nodes, setEdges],
   )
 
   const handleConnect = useCallback(
     (connection: Connection) => {
-      setEdges((current) =>
-        addEdge(
+      const sourceNode = nodes.find((node) => node.id === connection.source)
+      const targetNode = nodes.find((node) => node.id === connection.target)
+      const targetsImageInput = isImageInputHandle(connection.targetHandle)
+
+      if (targetNode?.data.kind === 'image' || targetNode?.data.kind === 'repaint') {
+        if (targetsImageInput && sourceNode?.data.kind === 'prompt') {
+          setToast('提示词节点请连接到 Prompt 输入。')
+          return
+        }
+        if (connection.targetHandle === 'prompt' && sourceNode?.data.kind !== 'prompt') {
+          setToast('参考图和生成图请连接到 Image 输入。')
+          return
+        }
+      }
+
+      setEdges((current) => {
+        const connected = addEdge(
           {
             ...connection,
             animated: true,
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#61c7e8' },
-          style: { stroke: '#61c7e8' },
+            markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+            style: { stroke: workflowEdgeColor },
           },
           current,
-        ),
-      )
+        )
+        return normalizeImageInputEdges(connected, nodes)
+      })
       markDirty()
     },
-    [markDirty, setEdges],
+    [markDirty, nodes, setEdges],
   )
 
   const updateNodeData = useCallback(
@@ -1119,7 +1501,7 @@ export default function App() {
 
   const deleteNodesByIds = useCallback(
     (nodeIds: string[]) => {
-      const idsToDelete = new Set(nodeIds.filter(Boolean))
+      const idsToDelete = collectNodeFamilyIds(nodeIds, nodes)
       if (!idsToDelete.size) return
 
       setNodes((current) => current.filter((node) => !idsToDelete.has(node.id)))
@@ -1128,7 +1510,7 @@ export default function App() {
       markDirty()
       setToast(idsToDelete.size > 1 ? `已删除 ${idsToDelete.size} 个画布节点。` : '已删除选中的画布节点。')
     },
-    [markDirty, setEdges, setNodes],
+    [markDirty, nodes, setEdges, setNodes],
   )
 
   const deleteNode = useCallback(
@@ -1138,9 +1520,126 @@ export default function App() {
     [deleteNodesByIds],
   )
 
+  const openCreateGroupDialog = useCallback(() => {
+    const selectedNodes = nodes.filter((node) => node.selected)
+    const groupableNodes = selectedNodes.filter((node) => !node.parentId && node.data.kind !== 'group')
+    if (groupableNodes.length < 2 || groupableNodes.length !== selectedNodes.length) {
+      setToast('请选择至少两个尚未分组的节点。')
+      return
+    }
+
+    setGroupNameDraft(`分组 ${nodes.filter((node) => node.data.kind === 'group').length + 1}`)
+    setGroupDialog({ mode: 'create', nodeIds: groupableNodes.map((node) => node.id) })
+  }, [nodes])
+
+  const openRenameGroupDialog = useCallback(
+    (groupId: string) => {
+      const groupNode = nodes.find((node) => node.id === groupId && node.data.kind === 'group')
+      if (!groupNode) return
+      setGroupNameDraft(groupNode.data.title)
+      setGroupDialog({ mode: 'rename', groupId })
+    },
+    [nodes],
+  )
+
+  const closeGroupDialog = useCallback(() => {
+    setGroupDialog(null)
+    setGroupNameDraft('')
+  }, [])
+
+  const submitGroupDialog = useCallback(() => {
+    if (!groupDialog) return
+    const groupName = groupNameDraft.trim()
+    if (!groupName) {
+      setToast('请输入分组名称。')
+      return
+    }
+
+    if (groupDialog.mode === 'rename') {
+      setNodes((current) =>
+        current.map((node) =>
+          node.id === groupDialog.groupId ? { ...node, data: { ...node.data, title: groupName } } : node,
+        ),
+      )
+      markDirty()
+      setToast(`分组已重命名为“${groupName}”。`)
+      closeGroupDialog()
+      return
+    }
+
+    const candidateIds = new Set(groupDialog.nodeIds)
+    const members = nodes.filter(
+      (node) => candidateIds.has(node.id) && !node.parentId && node.data.kind !== 'group',
+    )
+    if (members.length < 2) {
+      setToast('可分组的节点不足两个，请重新框选。')
+      closeGroupDialog()
+      return
+    }
+
+    const bounds = members.reduce(
+      (result, node) => {
+        const size = getWorkflowNodeSize(node)
+        return {
+          minX: Math.min(result.minX, node.position.x),
+          minY: Math.min(result.minY, node.position.y),
+          maxX: Math.max(result.maxX, node.position.x + size.width),
+          maxY: Math.max(result.maxY, node.position.y + size.height),
+        }
+      },
+      { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
+    )
+    const paddingX = 36
+    const paddingTop = 58
+    const paddingBottom = 34
+    const groupId = id('group')
+    const groupPosition = { x: bounds.minX - paddingX, y: bounds.minY - paddingTop }
+    const groupNode: WorkflowNode = {
+      id: groupId,
+      type: 'workflow',
+      position: groupPosition,
+      selected: true,
+      zIndex: 0,
+      style: {
+        width: Math.max(320, bounds.maxX - bounds.minX + paddingX * 2),
+        height: Math.max(220, bounds.maxY - bounds.minY + paddingTop + paddingBottom),
+      },
+      data: {
+        kind: 'group',
+        title: groupName,
+        status: 'idle',
+        createdAt: new Date().toLocaleString('zh-CN'),
+      },
+    }
+
+    setNodes((current) => [
+      groupNode,
+      ...current.map((node) => {
+        if (!candidateIds.has(node.id)) return { ...node, selected: false }
+        return {
+          ...node,
+          parentId: groupId,
+          extent: 'parent' as const,
+          position: {
+            x: node.position.x - groupPosition.x,
+            y: node.position.y - groupPosition.y,
+          },
+          selected: false,
+          selectable: false,
+          draggable: false,
+          zIndex: 1,
+        }
+      }),
+    ])
+    setSelectedNodeId(groupId)
+    markDirty()
+    setToast(`已创建分组“${groupName}”，包含 ${members.length} 个节点。`)
+    closeGroupDialog()
+  }, [closeGroupDialog, groupDialog, groupNameDraft, markDirty, nodes, setNodes])
+
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || groupDialog || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -1149,7 +1648,7 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, nodes, selectedNodeId, showSettings],
+    [deleteNodesByIds, groupDialog, nodes, selectedNodeId, showSettings],
   )
 
   useEffect(() => {
@@ -1281,9 +1780,10 @@ export default function App() {
       const imageNodeId = id('image')
       const createdAt = new Date().toLocaleString('zh-CN')
       const releasedY = dropPosition.y - 180
+      const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
       const position = {
-        x: sourceNode.position.x + 380,
-        y: Math.min(Math.max(releasedY, sourceNode.position.y - 40), sourceNode.position.y + 120),
+        x: sourcePosition.x + 380,
+        y: Math.min(Math.max(releasedY, sourcePosition.y - 40), sourcePosition.y + 120),
       }
       const imageNode: WorkflowNode = {
         id: imageNodeId,
@@ -1306,10 +1806,12 @@ export default function App() {
         {
           id: id('edge'),
           source: sourceNode.id,
+          sourceHandle: 'output',
           target: imageNodeId,
+          targetHandle: `${imageInputHandlePrefix}1`,
           animated: true,
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#61c7e8' },
-          style: { stroke: '#61c7e8', strokeWidth: 1.6 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+          style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
         },
       ])
       setSelectedNodeId(imageNodeId)
@@ -1328,7 +1830,7 @@ export default function App() {
           : `已创建 ${outputSize} 生成框，请连接提示词和参考图后点击生成。`,
       )
     },
-    [apiConfig, flowInstance, markDirty, setEdges, setNodes],
+    [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes],
   )
 
   const createRepaintOutput = useCallback(
@@ -1342,9 +1844,10 @@ export default function App() {
       const repaintNodeId = id('repaint')
       const createdAt = new Date().toLocaleString('zh-CN')
       const releasedY = dropPosition.y - 210
+      const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
       const position = {
-        x: sourceNode.position.x + 410,
-        y: Math.min(Math.max(releasedY, sourceNode.position.y - 72), sourceNode.position.y + 120),
+        x: sourcePosition.x + 410,
+        y: Math.min(Math.max(releasedY, sourcePosition.y - 72), sourcePosition.y + 120),
       }
       const repaintNode: WorkflowNode = {
         id: repaintNodeId,
@@ -1370,10 +1873,12 @@ export default function App() {
         {
           id: id('edge'),
           source: sourceNode.id,
+          sourceHandle: 'output',
           target: repaintNodeId,
+          targetHandle: 'image',
           animated: true,
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#61c7e8' },
-          style: { stroke: '#61c7e8', strokeWidth: 1.6 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+          style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
         },
       ])
       setSelectedNodeId(repaintNodeId)
@@ -1388,7 +1893,7 @@ export default function App() {
       }, 0)
       setToast('已创建重绘节点，涂抹区域并输入提示词后点击重绘生成。')
     },
-    [apiConfig, flowInstance, markDirty, setEdges, setNodes],
+    [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes],
   )
 
   const handleConnectStart = useCallback<OnConnectStart>((_, params) => {
@@ -1438,12 +1943,12 @@ export default function App() {
       if (target?.closest('.canvas-context-menu')) return
 
       event.preventDefault()
-      if (target?.closest('.workflow-node, .react-flow__controls')) return
+      if (target?.closest('.workflow-node, .workflow-group, .react-flow__controls')) return
 
       const clientPosition = { x: event.clientX, y: event.clientY }
       const menuPosition = {
         x: Math.min(clientPosition.x, window.innerWidth - 210),
-        y: Math.min(clientPosition.y, window.innerHeight - 92),
+        y: Math.min(clientPosition.y, window.innerHeight - 132),
       }
       const flowPosition =
         flowInstance?.screenToFlowPosition(clientPosition, {
@@ -1466,23 +1971,73 @@ export default function App() {
     closeContextMenu()
   }, [closeContextMenu])
 
-  const nodesWithActions = nodes.map((node) => ({
-    ...node,
-    data: {
-      ...node.data,
-      onDelete: deleteNode,
-      onDownload: downloadNodeImage,
-      onRevealImage: (nodeId: string) => void revealNodeImage(nodeId),
-      onGenerate: (nodeId: string) => void generateFromNode(nodeId),
-      onChangeSize: changeNodeSize,
-      onChangePrompt: changeNodePrompt,
-      onChangeMask: changeNodeMask,
-      onChangeBrush: changeNodeBrush,
-      onChangeBrushColor: changeNodeBrushColor,
-      onClearMask: clearNodeMask,
-      onUsePrompt: useNodePrompt,
+  const disconnectEdge = useCallback(
+    (edgeId: string) => {
+      setEdges((current) => normalizeImageInputEdges(current.filter((edge) => edge.id !== edgeId), nodes))
+      markDirty()
+      setToast('已取消连接。')
     },
-  }))
+    [markDirty, nodes, setEdges],
+  )
+
+  const nodeKindById = new Map(nodes.map((node) => [node.id, node.data.kind]))
+  const nodesWithActions = nodes.map((node) => {
+    const incomingEdges = edges.filter((edge) => edge.target === node.id)
+    const promptInputConnected = incomingEdges.some(
+      (edge) => edge.targetHandle === 'prompt' || (!edge.targetHandle && nodeKindById.get(edge.source) === 'prompt'),
+    )
+    const imageInputEdges = incomingEdges.filter(
+      (edge) => isImageInputHandle(edge.targetHandle) || (!edge.targetHandle && nodeKindById.get(edge.source) !== 'prompt'),
+    )
+    const connectedImageIndexes = new Set(
+      imageInputEdges.map((edge, index) => imageInputHandleIndex(edge.targetHandle) ?? index + 1),
+    )
+    const highestConnectedImageIndex = Math.max(0, ...connectedImageIndexes)
+    const visibleImageSlotCount = node.data.kind === 'image' ? Math.max(1, highestConnectedImageIndex + 1) : 1
+    const imageInputSlots = Array.from({ length: visibleImageSlotCount }, (_, index) => ({
+      id: node.data.kind === 'image' ? `${imageInputHandlePrefix}${index + 1}` : 'image',
+      index: index + 1,
+      connected: connectedImageIndexes.has(index + 1),
+    }))
+
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        model: (node.data.kind === 'image' || node.data.kind === 'repaint') ? apiConfig.model : node.data.model,
+        promptInputConnected,
+        imageInputConnected: imageInputEdges.length > 0,
+        imageInputSlots,
+        outputConnected: edges.some((edge) => edge.source === node.id),
+        memberCount: node.data.kind === 'group' ? nodes.filter((item) => item.parentId === node.id).length : undefined,
+        onDelete: deleteNode,
+        onDownload: downloadNodeImage,
+        onRevealImage: (nodeId: string) => void revealNodeImage(nodeId),
+        onReplaceImage: replaceReferenceImage,
+        onGenerate: (nodeId: string) => void generateFromNode(nodeId),
+        onChangeSize: changeNodeSize,
+        onChangePrompt: changeNodePrompt,
+        onChangeMask: changeNodeMask,
+        onChangeBrush: changeNodeBrush,
+        onChangeBrushColor: changeNodeBrushColor,
+        onClearMask: clearNodeMask,
+        onUsePrompt: useNodePrompt,
+        onRenameGroup: openRenameGroupDialog,
+      },
+    }
+  })
+
+  const renderedEdges = useMemo(
+    () =>
+      edges.map((edge) => ({
+        ...edge,
+        type: 'disconnectible',
+        data: { ...edge.data, onDisconnect: disconnectEdge },
+        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+        style: { ...edge.style, stroke: workflowEdgeColor },
+      })),
+    [disconnectEdge, edges],
+  )
 
   async function runGeneration(sourcePrompt: string, sourceNodeId?: string) {
     const trimmed = sourcePrompt.trim()
@@ -1496,6 +2051,7 @@ export default function App() {
     const baseX = 80 + (baseIndex % 2) * 520
     const baseY = 80 + Math.floor(baseIndex / 2) * 390
     const sourceNode = sourceNodeId ? nodes.find((item) => item.id === sourceNodeId) : null
+    const sourcePosition = sourceNode ? getAbsoluteNodePosition(sourceNode, nodes) : null
     const outputSize = sourceNode?.data.size || apiConfig.size || defaultApiConfig.size
     const configForNode = { ...apiConfig, size: outputSize }
     const promptNodeId = sourceNodeId ?? id('prompt')
@@ -1523,8 +2079,8 @@ export default function App() {
       id: imageNodeId,
       type: 'workflow',
       position: {
-        x: sourceNode ? sourceNode.position.x + 380 : baseX + 410,
-        y: sourceNode ? sourceNode.position.y : baseY,
+        x: sourcePosition ? sourcePosition.x + 380 : baseX + 410,
+        y: sourcePosition ? sourcePosition.y : baseY,
       },
       data: {
         kind: 'image',
@@ -1542,10 +2098,12 @@ export default function App() {
       {
         id: id('edge'),
         source: promptNodeId,
+        sourceHandle: 'output',
         target: imageNodeId,
+        targetHandle: 'prompt',
         animated: true,
-        markerEnd: { type: MarkerType.ArrowClosed, color: '#61c7e8' },
-        style: { stroke: '#61c7e8' },
+        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+        style: { stroke: workflowEdgeColor },
       },
     ])
     setSelectedNodeId(imageNodeId)
@@ -1601,16 +2159,37 @@ export default function App() {
     const node = nodes.find((item) => item.id === nodeId)
     if (!node || node.data.kind !== 'image') return
 
-    const sourceNodes = edges
+    const incomingInputs = edges
       .filter((edge) => edge.target === nodeId)
-      .map((edge) => nodes.find((item) => item.id === edge.source))
-      .filter((item): item is WorkflowNode => Boolean(item))
+      .map((edge, edgeOrder) => ({
+        edge,
+        edgeOrder,
+        sourceNode: nodes.find((item) => item.id === edge.source),
+      }))
+      .filter(
+        (item): item is { edge: Edge; edgeOrder: number; sourceNode: WorkflowNode } => Boolean(item.sourceNode),
+      )
     const promptSourceNode =
-      sourceNodes.find((item) => item.data.kind === 'prompt' && item.data.prompt?.trim()) ??
-      sourceNodes.find((item) => item.data.kind === 'repaint' && item.data.prompt?.trim())
-    const referenceImageUrls = sourceNodes
-      .filter((item) => item.data.imageUrl)
-      .map((item) => item.data.imageUrl as string)
+      incomingInputs.find(
+        ({ edge, sourceNode }) => edge.targetHandle === 'prompt' && sourceNode.data.kind === 'prompt' && sourceNode.data.prompt?.trim(),
+      )?.sourceNode ??
+      incomingInputs.find(({ edge, sourceNode }) => !edge.targetHandle && sourceNode.data.kind === 'prompt' && sourceNode.data.prompt?.trim())
+        ?.sourceNode
+    const referenceImageUrls = incomingInputs
+      .filter(
+        ({ edge, sourceNode }) =>
+          Boolean(sourceNode.data.imageUrl) &&
+          (isImageInputHandle(edge.targetHandle) || (!edge.targetHandle && sourceNode.data.kind !== 'prompt')),
+      )
+      .sort((left, right) => {
+        const leftIndex = imageInputHandleIndex(left.edge.targetHandle)
+        const rightIndex = imageInputHandleIndex(right.edge.targetHandle)
+        if (leftIndex !== null && rightIndex !== null && leftIndex !== rightIndex) return leftIndex - rightIndex
+        if (leftIndex !== null && rightIndex === null) return -1
+        if (leftIndex === null && rightIndex !== null) return 1
+        return left.edgeOrder - right.edgeOrder
+      })
+      .map(({ sourceNode }) => sourceNode.data.imageUrl as string)
     const trimmed = promptSourceNode?.data.prompt?.trim() || node.data.prompt?.trim() || ''
 
     if (!trimmed) {
@@ -1631,7 +2210,8 @@ export default function App() {
     })
 
     try {
-      const imageUrl = await requestGeneratedImage(trimmed, configForNode, referenceImageUrls)
+      const orderedPrompt = promptWithReferenceImageOrder(trimmed, referenceImageUrls.length)
+      const imageUrl = await requestGeneratedImage(orderedPrompt, configForNode, referenceImageUrls)
       updateNodeData(nodeId, {
         imageUrl,
         status: 'done',
@@ -1651,7 +2231,12 @@ export default function App() {
         },
         ...current,
       ])
-      setToast(apiConfig.mode === 'mock' ? `已在图像框内生成 ${outputSize} 模拟图。` : `已在图像框内生成 ${outputSize} 图像。`)
+      const referenceSummary = referenceImageUrls.length > 1 ? `，已按 Image 1–${referenceImageUrls.length} 顺序读取参考图` : ''
+      setToast(
+        apiConfig.mode === 'mock'
+          ? `已在图像框内生成 ${outputSize} 模拟图${referenceSummary}。`
+          : `已在图像框内生成 ${outputSize} 图像${referenceSummary}。`,
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : '生成失败'
       updateNodeData(nodeId, { status: 'error', error: message })
@@ -1835,51 +2420,39 @@ export default function App() {
     closeContextMenu()
   }
 
+  function addImageGenerationNodeAt(position: XYPosition) {
+    const node: WorkflowNode = {
+      id: id('image'),
+      type: 'workflow',
+      position,
+      data: {
+        kind: 'image',
+        title: 'AI 生成图像',
+        prompt: '',
+        status: 'idle',
+        model: apiConfig.model,
+        size: apiConfig.size || defaultApiConfig.size,
+        createdAt: new Date().toLocaleString('zh-CN'),
+      },
+    }
+    setNodes((current) => [...current, node])
+    setSelectedNodeId(node.id)
+    markDirty()
+    setToast('已在画布中添加图像生成框。')
+  }
+
+  function addImageGenerationFromMenu() {
+    if (!contextMenu) return
+    addImageGenerationNodeAt(contextMenu.flowPosition)
+    closeContextMenu()
+  }
+
   function uploadReferenceFromMenu() {
     if (contextMenu) {
       pendingNodePositionRef.current = contextMenu.flowPosition
     }
     closeContextMenu()
     referenceInputRef.current?.click()
-  }
-
-  function saveProject() {
-    const project: ProjectFile = {
-      version: 1,
-      projectName,
-      nodes: nodes.map(cleanNode),
-      edges: edges.map(cleanEdge),
-      history,
-    }
-    window.localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(project))
-    window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(apiConfig))
-    setDirty(false)
-    setToast('项目已保存到当前浏览器。')
-  }
-
-  function openProject() {
-    const saved = window.localStorage.getItem(PROJECT_STORAGE_KEY)
-    if (!saved) {
-      setToast('当前浏览器没有已保存项目。')
-      return
-    }
-    const project = normalizeImportedProject(JSON.parse(saved) as Partial<ProjectFile>)
-    setProjectName(project.projectName || '未命名项目')
-    setNodes(project.nodes || [])
-    setEdges(project.edges || [])
-    setHistory(project.history || [])
-    setDirty(false)
-    setToast('已打开本地保存项目。')
-  }
-
-  function newProject() {
-    setProjectName('未命名项目')
-    setNodes([])
-    setEdges([])
-    setHistory([])
-    setSelectedNodeId(null)
-    setDirty(false)
-    setToast('已新建空白项目。')
   }
 
   async function exportProject() {
@@ -2012,6 +2585,27 @@ export default function App() {
     event.target.value = ''
   }
 
+  function replaceReferenceImage(nodeId: string, file: File) {
+    if (!file.type.startsWith('image/')) {
+      setToast('请选择有效的图片文件。')
+      return
+    }
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      updateNodeData(nodeId, {
+        imageUrl: String(reader.result),
+        sourceName: file.name,
+        status: 'done',
+        error: undefined,
+        createdAt: new Date().toLocaleString('zh-CN'),
+      })
+      setToast(`已替换参考图：${file.name}`)
+    }
+    reader.onerror = () => setToast('替换失败，请重新选择图片。')
+    reader.readAsDataURL(file)
+  }
+
   function updateApiConfig(patch: Partial<ApiConfig>) {
     setApiConfig((current) => {
       const preset = patch.mode === 'grsai' ? grsAiApiConfig : {}
@@ -2039,16 +2633,17 @@ export default function App() {
     }
   }
 
+  const selectedCanvasNodes = nodes.filter((node) => node.selected)
+  const canGroupSelection =
+    selectedCanvasNodes.length >= 2 &&
+    selectedCanvasNodes.every((node) => !node.parentId && node.data.kind !== 'group')
+
   return (
     <main className="canvas-app">
       <header className="app-header">
         <div className="brand-zone">
           <div className="brand-mark">
             <img src={brandLogo} alt="JUC" />
-          </div>
-          <div>
-            <h1>AI 画布工作台</h1>
-            <span>无限画布图像生成工作流</span>
           </div>
           <input
             className="project-name"
@@ -2062,18 +2657,6 @@ export default function App() {
         </div>
 
         <div className="header-actions">
-          <button type="button" onClick={newProject} title="新建项目">
-            <FilePlus2 size={15} />
-            新建
-          </button>
-          <button type="button" onClick={openProject} title="打开本地项目">
-            <FolderOpen size={15} />
-            打开
-          </button>
-          <button type="button" onClick={saveProject} title="保存到浏览器">
-            <Save size={15} />
-            保存
-          </button>
           <button type="button" onClick={exportProject} title="导出 ZIP 项目包" disabled={isExporting}>
             {isExporting ? <Loader2 className="export-spinner" size={15} /> : <Download size={15} />}
             {isExporting ? '导出中' : '导出'}
@@ -2113,30 +2696,93 @@ export default function App() {
         <div className="flow-shell" onContextMenu={handlePaneContextMenu}>
           <ReactFlow
             nodes={nodesWithActions}
-            edges={edges}
+            edges={renderedEdges}
             nodeTypes={workflowNodeTypes}
+            edgeTypes={workflowEdgeTypes}
             onNodesChange={handleNodesChange}
             onEdgesChange={handleEdgesChange}
             onConnect={handleConnect}
             onConnectStart={handleConnectStart}
             onConnectEnd={handleConnectEnd}
             onInit={setFlowInstance}
-            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onNodeClick={(_, node) => {
+              const selectionId = node.parentId ?? node.id
+              setSelectedNodeId(selectionId)
+              if (node.parentId) {
+                setNodes((current) =>
+                  current.map((item) => ({ ...item, selected: item.id === node.parentId })),
+                )
+              }
+            }}
+            onEdgeClick={(event, edge) => {
+              event.stopPropagation()
+              disconnectEdge(edge.id)
+            }}
             onPaneClick={handlePaneClick}
             onPaneContextMenu={handlePaneContextMenu}
             fitView
             fitViewOptions={{ padding: 0.2, maxZoom: 0.92 }}
+            proOptions={{ hideAttribution: true }}
+            selectionOnDrag
+            selectionMode={SelectionMode.Partial}
+            panOnDrag={[1]}
+            deleteKeyCode={null}
+            elevateNodesOnSelect={false}
             minZoom={0.12}
             maxZoom={2.4}
             defaultEdgeOptions={{
               animated: true,
-              markerEnd: { type: MarkerType.ArrowClosed, color: '#61c7e8' },
-              style: { stroke: '#61c7e8', strokeWidth: 1.5 },
+              markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+              style: { stroke: workflowEdgeColor, strokeWidth: 1.5 },
             }}
           >
-            <Background color="#2c3845" gap={26} size={1} />
+            <Background color="#435365" gap={26} size={1.2} />
             <Controls showInteractive={false} />
           </ReactFlow>
+          {selectedCanvasNodes.length > 0 && !groupDialog && (
+            <div className="selection-toolbar" role="toolbar" aria-label="已选节点操作">
+              <div className="selection-toolbar-summary">
+                <strong>已选 {selectedCanvasNodes.length} 项</strong>
+                <span>
+                  {selectedCanvasNodes.some((node) => node.data.kind === 'group')
+                    ? '拖动分组可整体移动'
+                    : '拖动任一节点可同步移动'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={openCreateGroupDialog}
+                disabled={!canGroupSelection}
+                title={canGroupSelection ? '把选中的节点打组' : '请选择至少两个未分组节点'}
+              >
+                <GroupIcon size={14} />
+                打组
+              </button>
+              <button
+                className="selection-toolbar-delete"
+                type="button"
+                onClick={() => deleteNodesByIds(selectedCanvasNodes.map((node) => node.id))}
+              >
+                <Trash2 size={14} />
+                删除
+              </button>
+            </div>
+          )}
+          {!welcomeDismissed && nodes.length === 0 && (
+            <div className="canvas-welcome" aria-hidden="true">
+              <SplitText
+                tag="h2"
+                text="你好，欢迎来到JUG无限画布"
+                className="canvas-welcome-title"
+                delay={58}
+                duration={0.9}
+                ease="power3.out"
+                splitType="chars"
+                from={{ opacity: 0, y: 22, filter: 'blur(6px)' }}
+                to={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+              />
+            </div>
+          )}
           {contextMenu && (
             <div
               className="canvas-context-menu"
@@ -2151,20 +2797,41 @@ export default function App() {
                 <Wand2 size={15} />
                 添加提示词输入框
               </button>
+              <button type="button" onClick={addImageGenerationFromMenu}>
+                <ImageIcon size={15} />
+                图像生成
+              </button>
             </div>
           )}
           <div className="prompt-library-popover">
-            <button
+            <SpecularButton
               className={`prompt-library-toggle ${showPromptLibrary ? 'active' : ''}`}
-              type="button"
+              size="md"
+              radius={8}
+              tint="#ffffff"
+              tintOpacity={0}
+              blur={0}
+              textColor="#f5f5f5"
+              lineColor="#ffffff"
+              baseColor="#525252"
+              intensity={0.8}
+              shineSize={11}
+              shineFade={31}
+              thickness={1.3}
+              speed={0.3}
+              proximity={50}
+              followMouse
+              autoAnimate={false}
               onClick={() => setShowPromptLibrary((current) => !current)}
               title="常用提示词"
+              aria-expanded={showPromptLibrary}
+              aria-controls="prompt-library-panel"
             >
               <BookOpen size={15} />
               提示词
-            </button>
+            </SpecularButton>
             {showPromptLibrary && (
-              <section className="prompt-library-panel" aria-label="提示词库">
+              <section id="prompt-library-panel" className="prompt-library-panel" aria-label="提示词库">
                 <div className="prompt-library-head">
                   <div>
                     <strong>提示词库</strong>
@@ -2199,25 +2866,22 @@ export default function App() {
               </section>
             )}
           </div>
-          <div className="history-popover">
+          <div className={`history-popover ${showHistoryPanel ? 'expanded' : ''}`}>
             <button
               className={`history-toggle ${showHistoryPanel ? 'active' : ''}`}
               type="button"
               onClick={() => setShowHistoryPanel((current) => !current)}
-              title="生成历史"
+              title={showHistoryPanel ? '收起生成历史' : '生成历史'}
+              aria-label={showHistoryPanel ? '收起生成历史' : '展开生成历史'}
+              aria-expanded={showHistoryPanel}
+              aria-controls="generation-history-panel"
             >
               <History size={15} />
-              生成历史
-              <span>{history.length}</span>
+              <span className="history-toggle-label">生成历史</span>
+              {showHistoryPanel && <X className="history-toggle-close" size={15} />}
             </button>
             {showHistoryPanel && (
-              <div className="history-menu">
-                <div className="history-menu-head">
-                  <strong>生成历史</strong>
-                  <button type="button" onClick={() => setShowHistoryPanel(false)} title="关闭历史">
-                    <X size={15} />
-                  </button>
-                </div>
+              <div className="history-menu" id="generation-history-panel">
                 {history.length ? (
                   <div className="history-grid">
                     {history.slice(0, 12).map((item, index) => {
@@ -2254,6 +2918,49 @@ export default function App() {
         </div>
       </section>
 
+      {groupDialog && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="group-name-modal" role="dialog" aria-modal="true" aria-label={groupDialog.mode === 'create' ? '创建分组' : '重命名分组'}>
+            <div className="modal-head">
+              <div>
+                <h2>{groupDialog.mode === 'create' ? '创建分组' : '重命名分组'}</h2>
+                <p>
+                  {groupDialog.mode === 'create'
+                    ? `将 ${groupDialog.nodeIds.length} 个节点作为一个整体移动和删除。`
+                    : '修改分组在画布上显示的名称。'}
+                </p>
+              </div>
+              <button type="button" onClick={closeGroupDialog} title="关闭">
+                <X size={18} />
+              </button>
+            </div>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault()
+                submitGroupDialog()
+              }}
+            >
+              <label className="group-name-field">
+                <span>分组名称</span>
+                <input
+                  autoFocus
+                  value={groupNameDraft}
+                  maxLength={40}
+                  onChange={(event) => setGroupNameDraft(event.target.value)}
+                  placeholder="例如：产品主视觉"
+                />
+              </label>
+              <div className="group-name-actions">
+                <button type="button" onClick={closeGroupDialog}>取消</button>
+                <button className="primary" type="submit" disabled={!groupNameDraft.trim()}>
+                  {groupDialog.mode === 'create' ? '创建分组' : '保存名称'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
       {showSettings && (
         <div className="modal-backdrop" role="presentation">
           <section className="settings-modal" role="dialog" aria-modal="true" aria-label="API 设置">
@@ -2271,7 +2978,7 @@ export default function App() {
               <label className="field">
                 <span>模式</span>
                 <select value={apiConfig.mode} onChange={(event) => updateApiConfig({ mode: event.target.value as ApiMode })}>
-                  <option value="grsai">GrsAI GPT Image</option>
+                  <option value="grsai">GA 全部生图模型</option>
                   <option value="mock">本地模拟</option>
                   <option value="openai">OpenAI 兼容</option>
                   <option value="custom">自定义 JSON API</option>
@@ -2281,10 +2988,14 @@ export default function App() {
                 <span>模型</span>
                 {apiConfig.mode === 'grsai' ? (
                   <select value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })}>
-                    {grsAiModelOptions.map((model) => (
-                      <option key={model.value} value={model.value}>
-                        {model.label}
-                      </option>
+                    {grsAiModelGroups.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.models.map((model) => (
+                          <option key={model.value} value={model.value} disabled={model.disabled}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
                     ))}
                   </select>
                 ) : (
