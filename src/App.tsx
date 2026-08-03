@@ -30,6 +30,7 @@ import '@xyflow/react/dist/style.css'
 import {
   AlertTriangle,
   BookOpen,
+  Box,
   Brush,
   Check,
   CheckCircle2,
@@ -50,7 +51,7 @@ import {
   Wand2,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
@@ -64,6 +65,8 @@ import {
   normalizeGrsAiEndpoint,
   normalizeGrsAiModel,
 } from './grsaiModels'
+
+const Model3DStudio = lazy(() => import('./Model3DStudio'))
 
 type NodeKind = 'prompt' | 'image' | 'reference' | 'repaint' | 'group'
 type NodeStatus = 'idle' | 'generating' | 'done' | 'error'
@@ -1418,6 +1421,7 @@ export default function App() {
   const [, setIsGenerating] = useState(false)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [showModelStudio, setShowModelStudio] = useState(false)
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
   const [showPromptLibrary, setShowPromptLibrary] = useState(false)
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null)
@@ -1654,7 +1658,7 @@ export default function App() {
 
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || groupDialog || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || showModelStudio || groupDialog || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -1663,7 +1667,7 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, groupDialog, nodes, selectedNodeId, showSettings],
+    [deleteNodesByIds, groupDialog, nodes, selectedNodeId, showModelStudio, showSettings],
   )
 
   useEffect(() => {
@@ -2600,6 +2604,43 @@ export default function App() {
     event.target.value = ''
   }
 
+  function addModelPreviewToCanvas(result: { dataUrl: string; fileName: string; width: number; height: number }) {
+    const canvasCenter = flowInstance?.screenToFlowPosition(
+      { x: window.innerWidth / 2, y: window.innerHeight / 2 },
+      { snapToGrid: true, snapGrid: [24, 24] },
+    ) ?? { x: 150 + nodes.length * 24, y: 180 + nodes.length * 24 }
+    const node: WorkflowNode = {
+      id: id('ref'),
+      type: 'workflow',
+      position: { x: canvasCenter.x - 156, y: canvasCenter.y - 180 },
+      selected: true,
+      data: {
+        kind: 'reference',
+        title: '3D 模型参考图',
+        imageUrl: result.dataUrl,
+        status: 'done',
+        model: '3D 预览',
+        size: `${result.width}x${result.height}`,
+        sourceName: result.fileName,
+        createdAt: new Date().toLocaleString('zh-CN'),
+      },
+    }
+
+    setNodes((current) => [...current.map((item) => ({ ...item, selected: false })), node])
+    setSelectedNodeId(node.id)
+    setShowModelStudio(false)
+    markDirty()
+    setToast(`3D 视角已作为 ${result.width} × ${result.height} 参考图加入画板。`)
+    window.setTimeout(() => {
+      void flowInstance?.fitView({
+        nodes: [{ id: node.id }],
+        padding: 0.32,
+        maxZoom: 1,
+        duration: 220,
+      })
+    }, 0)
+  }
+
   function replaceReferenceImage(nodeId: string, file: File) {
     if (!file.type.startsWith('image/')) {
       setToast('请选择有效的图片文件。')
@@ -2679,6 +2720,10 @@ export default function App() {
           <button type="button" onClick={() => void chooseProjectToImport()} title="导入 ZIP 项目包或旧版 JSON">
             <Upload size={15} />
             导入
+          </button>
+          <button type="button" onClick={() => setShowModelStudio(true)} title="导入并预览 OBJ 或 FBX 模型">
+            <Box size={15} />
+            3D 模型
           </button>
           <button type="button" onClick={() => setShowSettings(true)} title="API 设置">
             <Settings size={15} />
@@ -2974,6 +3019,29 @@ export default function App() {
             </form>
           </section>
         </div>
+      )}
+
+      {showModelStudio && (
+        <Suspense
+          fallback={(
+            <div className="modal-backdrop" role="presentation">
+              <section className="settings-modal" role="status" aria-label="正在加载 3D 预览器">
+                <div className="modal-head">
+                  <div>
+                    <h2>正在加载 3D 预览器</h2>
+                    <p>首次打开需要载入三维引擎。</p>
+                  </div>
+                  <Loader2 className="export-spinner" size={18} />
+                </div>
+              </section>
+            </div>
+          )}
+        >
+          <Model3DStudio
+            onClose={() => setShowModelStudio(false)}
+            onExport={addModelPreviewToCanvas}
+          />
+        </Suspense>
       )}
 
       {showSettings && (

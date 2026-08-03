@@ -1,0 +1,826 @@
+.model3d-backdrop {
+  position: fixed;
+  z-index: 26;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(2, 5, 8, 0.76);
+  padding: 16px;
+  backdrop-filter: blur(14px);
+  animation: model3d-backdrop-in 160ms ease-out;
+}
+
+.model3d-studio {
+  display: grid;
+  width: min(1280px, calc(100vw - 32px));
+  height: min(820px, calc(100dvh - 32px));
+  min-height: 620px;
+  grid-template-rows: 64px minmax(0, 1fr) 62px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: #0d1218;
+  box-shadow:
+    0 36px 110px rgba(0, 0, 0, 0.62),
+    0 1px 0 rgba(255, 255, 255, 0.045) inset;
+  animation: model3d-studio-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.model3d-head,
+.model3d-foot,
+.model3d-filebar,
+.model3d-title,
+.model3d-title > div,
+.model3d-foot > div,
+.model3d-file-button,
+.model3d-icon-button,
+.model3d-section-title,
+.model3d-range-row,
+.model3d-unit-input,
+.model3d-view-buttons,
+.model3d-color-field > div,
+.model3d-export-button,
+.model3d-secondary-button {
+  display: flex;
+  align-items: center;
+}
+
+.model3d-head {
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(20, 27, 36, 0.96);
+  padding: 0 16px 0 18px;
+}
+
+.model3d-title {
+  min-width: 0;
+  gap: 11px;
+}
+
+.model3d-title > svg {
+  flex: 0 0 auto;
+  color: #b7c5d2;
+}
+
+.model3d-title > div {
+  min-width: 0;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.model3d-title h2,
+.model3d-title p {
+  margin: 0;
+}
+
+.model3d-title h2 {
+  color: #f1f5f8;
+  font-size: 16px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.model3d-title p {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model3d-icon-button {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.model3d-icon-button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #f6f9fb;
+}
+
+.model3d-body {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) 316px;
+}
+
+.model3d-stage {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: 48px minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px;
+}
+
+.model3d-filebar {
+  min-width: 0;
+  gap: 11px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 2px 10px;
+}
+
+.model3d-file-button,
+.model3d-empty-state button {
+  display: inline-flex;
+  height: 32px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid rgba(172, 184, 198, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  color: #dce5ec;
+  cursor: pointer;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.model3d-file-button:hover,
+.model3d-empty-state button:hover {
+  border-color: rgba(218, 226, 234, 0.34);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f7fafc;
+}
+
+.model3d-file-summary {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.model3d-file-summary strong,
+.model3d-file-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model3d-file-summary strong {
+  color: #e7edf2;
+  font-size: 12px;
+  font-weight: 660;
+}
+
+.model3d-file-summary span,
+.model3d-stats {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.model3d-stats {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model3d-viewport-frame {
+  container-type: size;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-items: center;
+  overflow: hidden;
+}
+
+.model3d-viewport {
+  position: relative;
+  width: min(100%, calc(100cqh * var(--model3d-aspect)));
+  max-height: 100%;
+  overflow: hidden;
+  aspect-ratio: var(--model3d-aspect);
+  border: 1px solid rgba(172, 184, 198, 0.18);
+  border-radius: 10px;
+  background: #111820;
+  box-shadow:
+    0 24px 58px rgba(0, 0, 0, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.035) inset;
+}
+
+.model3d-viewport-host,
+.model3d-canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.model3d-viewport-host {
+  position: absolute;
+  inset: 0;
+}
+
+.model3d-canvas {
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+
+.model3d-empty-state,
+.model3d-loading-state {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  background: rgba(13, 18, 24, 0.72);
+  color: var(--muted);
+  padding: 24px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.model3d-empty-state > svg,
+.model3d-loading-state > svg {
+  color: #758494;
+}
+
+.model3d-empty-state strong,
+.model3d-loading-state strong {
+  color: #dfe7ee;
+  font-size: 14px;
+}
+
+.model3d-empty-state p,
+.model3d-loading-state span {
+  max-width: 320px;
+  margin: 0;
+  color: #7f8d9b;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.model3d-empty-state button {
+  margin-top: 3px;
+  pointer-events: auto;
+}
+
+.model3d-loading-state > svg {
+  animation: model3d-spin 0.9s linear infinite;
+}
+
+.model3d-viewport-label {
+  position: absolute;
+  z-index: 3;
+  right: 10px;
+  bottom: 9px;
+  border: 1px solid rgba(172, 184, 198, 0.14);
+  border-radius: 6px;
+  background: rgba(6, 9, 13, 0.62);
+  color: rgba(224, 231, 237, 0.7);
+  padding: 5px 7px;
+  font-size: 10px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.model3d-inspector {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: rgba(17, 23, 31, 0.88);
+}
+
+.model3d-inspector::-webkit-scrollbar {
+  width: 7px;
+}
+
+.model3d-inspector::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: rgba(154, 167, 182, 0.22);
+}
+
+.model3d-control-section {
+  display: grid;
+  gap: 14px;
+  border-bottom: 1px solid var(--line);
+  padding: 16px;
+}
+
+.model3d-section-title {
+  gap: 8px;
+  color: #e7edf2;
+}
+
+.model3d-section-title svg {
+  color: #9eadba;
+}
+
+.model3d-section-title strong {
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.model3d-field,
+.model3d-color-field {
+  display: grid;
+  gap: 8px;
+}
+
+.model3d-field > span,
+.model3d-color-field > span {
+  color: #a9b5c1;
+  font-size: 11px;
+}
+
+.model3d-field small {
+  color: #667483;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.model3d-range-row {
+  gap: 10px;
+}
+
+.model3d-range-row > input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.model3d-unit-input {
+  width: 78px;
+  height: 32px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid rgba(172, 184, 198, 0.17);
+  border-radius: 7px;
+  background: rgba(7, 11, 16, 0.56);
+}
+
+.model3d-unit-input.compact {
+  width: 68px;
+}
+
+.model3d-unit-input input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: #e7edf2;
+  padding: 0 5px 0 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model3d-unit-input span {
+  flex: 0 0 auto;
+  color: #6f7e8c;
+  padding-right: 7px;
+  font-size: 10px;
+}
+
+.model3d-unit-input:focus-within {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px rgba(97, 199, 232, 0.07);
+}
+
+.model3d-view-buttons {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.model3d-view-buttons button,
+.model3d-size-options button {
+  border: 1px solid rgba(172, 184, 198, 0.15);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #afbbc6;
+  cursor: pointer;
+}
+
+.model3d-view-buttons button {
+  display: inline-flex;
+  height: 31px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.model3d-view-buttons button:hover:not(:disabled),
+.model3d-size-options button:hover,
+.model3d-size-options button.active {
+  border-color: rgba(97, 199, 232, 0.34);
+  background: rgba(97, 199, 232, 0.08);
+  color: #dceef5;
+}
+
+.model3d-view-buttons button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.model3d-color-field > div {
+  gap: 8px;
+}
+
+.model3d-color-field input[type='color'] {
+  width: 38px;
+  height: 32px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(172, 184, 198, 0.2);
+  border-radius: 7px;
+  background: rgba(7, 11, 16, 0.58);
+  cursor: pointer;
+  padding: 3px;
+}
+
+.model3d-color-field input[type='text'] {
+  width: 100%;
+  height: 32px;
+  border: 1px solid rgba(172, 184, 198, 0.17);
+  border-radius: 7px;
+  outline: none;
+  background: rgba(7, 11, 16, 0.56);
+  color: #dfe7ed;
+  padding: 0 9px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+}
+
+.model3d-color-field input[type='text']:focus {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px rgba(97, 199, 232, 0.07);
+}
+
+.model3d-projection-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.model3d-projection-toggle > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model3d-projection-toggle strong {
+  color: #c9d3dc;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.model3d-projection-toggle small {
+  color: #667483;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.model3d-projection-toggle input {
+  position: absolute;
+  right: 0;
+  width: 36px;
+  height: 20px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.model3d-projection-toggle > i {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(172, 184, 198, 0.22);
+  border-radius: 99px;
+  background: rgba(7, 11, 16, 0.62);
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.model3d-projection-toggle > i::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #7b8996;
+  content: '';
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), background-color 160ms ease;
+}
+
+.model3d-projection-toggle input:checked + i {
+  border-color: rgba(97, 199, 232, 0.55);
+  background: rgba(97, 199, 232, 0.18);
+}
+
+.model3d-projection-toggle input:checked + i::after {
+  background: var(--accent);
+  transform: translateX(16px);
+}
+
+.model3d-projection-toggle input:focus-visible + i {
+  box-shadow: 0 0 0 3px rgba(97, 199, 232, 0.11);
+}
+
+.model3d-light-direction-summary {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 76px;
+  border: 1px solid rgba(172, 184, 198, 0.13);
+  border-radius: 8px;
+  background: rgba(7, 11, 16, 0.34);
+  padding: 8px 10px;
+}
+
+.model3d-light-direction-dial {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  border: 1px solid rgba(172, 184, 198, 0.18);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(97, 199, 232, 0.08), rgba(8, 13, 18, 0.28) 68%);
+}
+
+.model3d-light-direction-dial > i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #9fb0bd;
+  transform: translate(-50%, -50%);
+}
+
+.model3d-light-direction-arm {
+  position: absolute;
+  top: calc(50% - 1px);
+  left: 50%;
+  width: 22px;
+  height: 1px;
+  transform: rotate(var(--model3d-light-angle));
+  transform-origin: left center;
+  background: rgba(97, 199, 232, 0.66);
+  transition: transform 120ms ease-out;
+}
+
+.model3d-light-direction-arm svg {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  color: var(--accent);
+  fill: rgba(97, 199, 232, 0.12);
+}
+
+.model3d-light-direction-summary > div:last-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model3d-light-direction-summary > div:last-child > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #8f9daa;
+  font-size: 10px;
+}
+
+.model3d-light-direction-summary > div:last-child strong {
+  color: #d9e2e9;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 680;
+}
+
+.model3d-light-direction-summary > div:last-child small {
+  color: #5f6c78;
+  font-size: 9px;
+}
+
+.model3d-size-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.model3d-size-options button {
+  position: relative;
+  display: grid;
+  min-height: 52px;
+  justify-items: start;
+  align-content: center;
+  gap: 3px;
+  padding: 8px 28px 8px 10px;
+  text-align: left;
+}
+
+.model3d-size-options button > span {
+  color: #e1e8ee;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.model3d-size-options button small {
+  color: #72808e;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model3d-size-options button svg {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  color: var(--accent);
+  transform: translateY(-50%);
+}
+
+.model3d-error {
+  margin: 12px 16px 16px;
+  border: 1px solid rgba(226, 125, 125, 0.28);
+  border-radius: 8px;
+  background: rgba(151, 62, 62, 0.12);
+  color: #f0b5b5;
+  padding: 10px 11px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.model3d-foot {
+  justify-content: space-between;
+  gap: 18px;
+  border-top: 1px solid var(--line);
+  background: rgba(17, 23, 31, 0.96);
+  padding: 0 16px 0 18px;
+}
+
+.model3d-foot p {
+  margin: 0;
+  overflow: hidden;
+  color: #748291;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model3d-foot > div {
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.model3d-export-button,
+.model3d-secondary-button {
+  height: 36px;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+.model3d-secondary-button {
+  border: 1px solid rgba(172, 184, 198, 0.16);
+  background: rgba(255, 255, 255, 0.035);
+  color: #bdc7d0;
+}
+
+.model3d-export-button {
+  min-width: 122px;
+  border: 1px solid rgba(97, 199, 232, 0.72);
+  background: var(--accent);
+  color: #071117;
+}
+
+.model3d-export-button:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.model3d-export-button:disabled {
+  cursor: not-allowed;
+  filter: none;
+  opacity: 0.42;
+}
+
+.model3d-file-button:active,
+.model3d-empty-state button:active,
+.model3d-view-buttons button:active:not(:disabled),
+.model3d-size-options button:active,
+.model3d-secondary-button:active,
+.model3d-export-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.model3d-spinner {
+  animation: model3d-spin 0.9s linear infinite;
+}
+
+@keyframes model3d-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes model3d-studio-in {
+  from {
+    transform: translateY(10px) scale(0.99);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes model3d-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model3d-backdrop,
+  .model3d-studio,
+  .model3d-light-direction-arm,
+  .model3d-projection-toggle > i,
+  .model3d-projection-toggle > i::after {
+    animation: none;
+    transition: none;
+  }
+
+  .model3d-loading-state > svg,
+  .model3d-spinner {
+    animation-duration: 1.8s;
+  }
+}
+
+@media (max-width: 900px) {
+  .model3d-backdrop {
+    padding: 0;
+  }
+
+  .model3d-studio {
+    width: 100%;
+    height: 100dvh;
+    min-height: 0;
+    border-radius: 0;
+  }
+
+  .model3d-body {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .model3d-stage {
+    min-height: 520px;
+  }
+
+  .model3d-inspector {
+    overflow: visible;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  .model3d-studio {
+    grid-template-rows: 64px minmax(0, 1fr) 68px;
+  }
+
+  .model3d-title > div {
+    display: grid;
+    gap: 2px;
+  }
+
+  .model3d-title p,
+  .model3d-stats,
+  .model3d-foot p {
+    display: none;
+  }
+
+  .model3d-stage {
+    min-height: 440px;
+  }
+
+  .model3d-file-summary span {
+    display: none;
+  }
+}
