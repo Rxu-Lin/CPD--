@@ -6,7 +6,6 @@ export type GrsAiModelOption = {
   value: string
   family: GrsAiModelFamily
   imageSize: GrsAiImageSize
-  disabled?: boolean
 }
 
 export type GrsAiModelGroup = {
@@ -30,14 +29,14 @@ export const grsAiModelGroups: GrsAiModelGroup[] = [
       { label: 'Nano Banana 2 Lite · 1K', value: 'nano-banana-2-lite', family: 'nano-banana', imageSize: '1K' },
       { label: 'Nano Banana Fast · 1K', value: 'nano-banana-fast', family: 'nano-banana', imageSize: '1K' },
       { label: 'Nano Banana 2 · 1K', value: 'nano-banana-2', family: 'nano-banana', imageSize: '1K' },
+      { label: 'Nano Banana 2 · 2K', value: 'nano-banana-2', family: 'nano-banana', imageSize: '2K' },
+      { label: 'Nano Banana 2 · 4K', value: 'nano-banana-2', family: 'nano-banana', imageSize: '4K' },
       { label: 'Nano Banana Pro · 1K', value: 'nano-banana-pro', family: 'nano-banana', imageSize: '1K' },
-      {
-        label: 'Nano Banana Pro VT · 维护中',
-        value: 'nano-banana-pro-vt',
-        family: 'nano-banana',
-        imageSize: '1K',
-        disabled: true,
-      },
+      { label: 'Nano Banana Pro · 2K', value: 'nano-banana-pro', family: 'nano-banana', imageSize: '2K' },
+      { label: 'Nano Banana Pro · 4K', value: 'nano-banana-pro', family: 'nano-banana', imageSize: '4K' },
+      { label: 'Nano Banana Pro VT · 1K', value: 'nano-banana-pro-vt', family: 'nano-banana', imageSize: '1K' },
+      { label: 'Nano Banana Pro VT · 2K', value: 'nano-banana-pro-vt', family: 'nano-banana', imageSize: '2K' },
+      { label: 'Nano Banana Pro VT · 4K', value: 'nano-banana-pro-vt', family: 'nano-banana', imageSize: '4K' },
     ],
   },
   {
@@ -48,21 +47,33 @@ export const grsAiModelGroups: GrsAiModelGroup[] = [
       { label: 'Nano Banana 2 CL · 2K', value: 'nano-banana-2-2k-cl', family: 'nano-banana', imageSize: '2K' },
       { label: 'Nano Banana 2 CL · 4K', value: 'nano-banana-2-4k-cl', family: 'nano-banana', imageSize: '4K' },
       { label: 'Nano Banana Pro VIP · 1K', value: 'nano-banana-pro-vip', family: 'nano-banana', imageSize: '1K' },
+      { label: 'Nano Banana Pro VIP · 2K', value: 'nano-banana-pro-vip', family: 'nano-banana', imageSize: '2K' },
       { label: 'Nano Banana Pro VIP · 4K', value: 'nano-banana-pro-4k-vip', family: 'nano-banana', imageSize: '4K' },
     ],
   },
 ]
 
 export const grsAiModelOptions = grsAiModelGroups.flatMap((group) => group.models)
-export const defaultGrsAiModel = 'gpt-image-2'
+export const defaultGrsAiModel = 'gpt-image-2::1k'
+
+export function grsAiModelSelectionValue(model: GrsAiModelOption) {
+  return `${model.value}::${model.imageSize.toLowerCase()}`
+}
 
 export function findGrsAiModel(model: string) {
   const value = model.trim().toLowerCase()
-  return grsAiModelOptions.find((item) => item.value === value || item.label.toLowerCase() === value)
+  const exactMatch = grsAiModelOptions.find(
+    (item) => grsAiModelSelectionValue(item) === value || item.label.toLowerCase() === value,
+  )
+  if (exactMatch) return exactMatch
+
+  // Migrate saved settings from versions that stored only the upstream model ID.
+  return grsAiModelOptions.find((item) => item.value === value)
 }
 
 export function normalizeGrsAiModel(model: string) {
-  return findGrsAiModel(model)?.value ?? defaultGrsAiModel
+  const selectedModel = findGrsAiModel(model) ?? findGrsAiModel(defaultGrsAiModel)
+  return selectedModel ? grsAiModelSelectionValue(selectedModel) : defaultGrsAiModel
 }
 
 export function normalizeGrsAiEndpoint(endpoint: string) {

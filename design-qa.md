@@ -1,45 +1,44 @@
 # Design QA
 
-Source visual truth: `browser:Selected browser region` from the current conversation annotation, page `http://127.0.0.1:5174/` at 1935 × 1272 CSS px.
+Source visual truth: the current AI canvas workbench at `http://127.0.0.1:5174/`, captured before the outpaint node was added.
 
-Implementation screenshot:
+Comparison evidence:
 
-- `D:\Codex-CPD无限画布网站\AI网站开发\welcome-title-carousel.jpg`
+- Source screenshot: `D:\Codex-CPD无限画布网站\AI网站开发\qa-source-current.png`
+- Implementation screenshot: `D:\Codex-CPD无限画布网站\AI网站开发\qa-implementation-outpaint-final.png`
+- Side-by-side comparison: `D:\Codex-CPD无限画布网站\AI网站开发\qa-outpaint-comparison.png`
+- Canvas menu verification: `D:\Codex-CPD无限画布网站\AI网站开发\qa-canvas-menu-ai-outpaint.png`
+- Viewport: 1935 × 1280 px.
 
-Viewport: 1935 × 1272 CSS px at device pixel ratio 1.5. State: empty canvas with the second carousel title fully visible.
+## Visual fidelity
 
-## Full-view comparison evidence
+- Layout and spacing: the new 410 px outpaint node follows the existing workflow-node shell, header rhythm, 12 px content gutters, 8–10 px control spacing, 14 px card radius, and canvas connection pattern.
+- Typography: labels, metadata, textarea copy, buttons, and pixel outputs reuse the workbench's existing small-scale hierarchy and neutral system font stack without clipping.
+- Colors and surfaces: the node keeps the existing dark navy-black surface, metallic neutral border, restrained white/gray states, and the existing canvas grid. No new decorative palette or unrelated visual language was introduced.
+- Icons: the Lucide Expand icon matches the stroke weight and optical size of the existing Image, Brush, Upload, and Delete icons.
+- Image treatment: the source image is displayed at its exact protected rectangle; the generated result fills only the target canvas behind it. The original is composited back at native protected coordinates after generation.
+- Copy: all controls are concise and standalone: `AI 扩图`, `扩展范围`, `原图保护区`, four-direction pixel values, ratio presets, `恢复默认`, and `运行扩图` accessibility label.
 
-- The existing top bar, canvas grid, prompt-library control, history control, and centered empty-canvas composition remain unchanged.
-- The center title keeps the original 34 px type size, weight 520, muted gray-white color, and exact canvas-center alignment.
-- The new title fits the existing maximum width without wrapping, clipping, or shifting the surrounding canvas.
+## Interaction and state checks
 
-## Focused region comparison evidence
+- Right-clicking the blank canvas shows `AI扩图` as the fourth creation action; image nodes no longer expose a right-click outpaint action.
+- Creating an outpaint node from the canvas menu produces an independent node, and connecting an image automatically synchronizes its protected region and pixel dimensions.
+- Default prompt is prefilled and editable; `恢复默认` restores it.
+- Ratio presets verified: `9:16` produced 456 × 811 px from the test source.
+- Boundary dragging verified: moving the right handle changed 456 × 811 px to 461 × 811 px and activated `自由` mode.
+- All four edges and four corners are present as semantic buttons with accessible labels and resize cursors.
+- Target dimensions are capped at 4096 px on the longest edge.
+- Local mock generation completed without an error, kept the result in the outpaint node, protected the source rectangle, and added a successful generation-history entry.
+- The original GrsAI API mode was restored after the safe local test.
+- Empty, generating, completed, invalid-range, and generation-error paths are implemented.
+- Reduced-motion behavior remains unchanged because the new interaction does not add decorative motion.
 
-- The original title and the new title were observed in one complete carousel cycle.
-- The second title is exactly `CPD专属开发，尽情发挥你的创意`.
-- Each character uses the same visual entrance parameters as the original effect: staggered character reveal, 22 px upward movement, blur from 6 px to 0, and opacity from 0 to 1.
-- The final rendered second-title bounds are 525.11 × 42.5 px at x 705.10, y 640.75.
+## Quality checks
 
-## Required fidelity surfaces
-
-- Typography: existing font family, size, weight, tracking, line height, and centered alignment are preserved.
-- Spacing: the empty-state title remains in the same center position with the same responsive width constraint.
-- Colors: the existing `rgba(214, 221, 228, 0.68)` title color and subtle text shadow are unchanged.
-- Assets: no image, icon, or brand asset was changed.
-- Copy: the requested wording is exact, including `尽情`.
-
-## Interaction and quality checks
-
-- The carousel loops between the existing welcome title and the new CPD title every 8 seconds.
-- Both titles replay the same staggered character entrance on every switch.
-- Reduced-motion users receive the same titles without animated movement or blur.
 - Browser console errors: none.
 - Production build: passed.
 - Lint: passed.
-
-## Findings
-
-No actionable P0, P1, or P2 differences remain for this scoped change.
+- Invalid model sizes and unsupported reference-image formats are rejected before an upstream request; upstream 400 responses now preserve their concrete error message and request summary.
+- No actionable P0, P1, or P2 visual or functional findings remain for this scoped feature.
 
 final result: passed

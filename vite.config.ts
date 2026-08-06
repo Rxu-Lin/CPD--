@@ -26,7 +26,7 @@ const runtimeImageSessionId = '00000000-0000-4000-8000-000000000000'
 const runtimeImagesDir = path.join(projectCacheDir, runtimeImageSessionId, 'images')
 const generationRateLimits = new Map<string, { count: number; startedAt: number }>()
 
-type ApiMode = 'mock' | 'openai' | 'grsai' | 'custom'
+type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'custom'
 
 type ApiConfig = {
   mode: ApiMode
@@ -639,14 +639,35 @@ function gptImageSizeFromSize(size: string) {
   const map: Record<string, string> = {
     '16:9': '1672x941',
     '3:2': '1536x1024',
-    '4:3': '1443x1090',
+    '4:3': '1448x1086',
     '1:1': '1024x1024',
-    '3:4': '1090x1443',
+    '3:4': '1086x1448',
     '2:3': '1024x1536',
     '9:16': '941x1672',
   }
 
   return map[ratio] || size || '1024x1024'
+}
+
+const supportedGptImageSizes = new Set([
+  '1024x1024',
+  '1672x941',
+  '1536x1024',
+  '1448x1086',
+  '1086x1448',
+  '1024x1536',
+  '941x1672',
+])
+
+const supportedNanoBananaRatios = new Set(['16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16'])
+
+function validateGrsAiOutputSize(family: 'gpt-image' | 'nano-banana', size: string) {
+  if (family === 'gpt-image' && !supportedGptImageSizes.has(size)) {
+    throw new UpstreamHttpError(`GPT Image 2 暂不支持尺寸 ${size}，请改用画布中的标准比例。`, 400)
+  }
+  if (family === 'nano-banana' && !supportedNanoBananaRatios.has(size)) {
+    throw new UpstreamHttpError(`Nano Banana 暂不支持比例 ${size}，请改用画布中的标准比例。`, 400)
+  }
 }
 
 function grsAiResultEndpoint(generationEndpoint: string, taskId: string) {
@@ -770,6 +791,48 @@ function grsAiFailureMessage(source: unknown) {
   return `GrsAI 生成失败：${failureReason || '未知错误'}`
 }
 
+class UpstreamHttpError extends Error {
+  statusCode: number
+
+  constructor(message: string, statusCode: number) {
+    super(message)
+    this.name = 'UpstreamHttpError'
+    this.statusCode = statusCode
+  }
+}
+
+function knownErrorText(source: unknown) {
+  if (!source || typeof source !== 'object') return undefined
+  const root = source as Record<string, unknown>
+  const direct = stringValue(root, ['message', 'msg', 'detail', 'reason'])
+  if (direct) return direct
+  if (typeof root.error === 'string' && root.error.trim()) return root.error.trim()
+  if (root.error && typeof root.error === 'object') {
+    const nested = stringValue(root.error as Record<string, unknown>, ['message', 'msg', 'detail', 'reason', 'error'])
+    if (nested) return nested
+  }
+  const errors = Array.isArray(root.errors) ? root.errors : []
+  for (const item of errors) {
+    if (typeof item === 'string' && item.trim()) return item.trim()
+    if (item && typeof item === 'object') {
+      const nested = stringValue(item as Record<string, unknown>, ['message', 'msg', 'detail', 'reason', 'error'])
+      if (nested) return nested
+    }
+  }
+  return undefined
+}
+
+function httpFailureMessage(source: unknown, status: number, statusText: string) {
+  const detail = knownErrorText(source)
+  if (detail) return `图像接口拒绝请求（${status}）：${detail}`
+  if (status === 400) return '图像接口拒绝请求（400）：当前模型不接受这组尺寸、参考图或提示词，请检查生成参数。'
+  if (status === 401) return '图像接口鉴权失败（401）：请检查 API Key。'
+  if (status === 402 || status === 403) return `图像接口拒绝访问（${status}）：请检查账户余额、模型权限或内容审核结果。`
+  if (status === 429) return '图像接口请求过于频繁（429）：请稍后重试。'
+  if (status >= 500) return `图像接口上游服务异常（${status}），请稍后重试。`
+  return `图像接口请求失败（${status} ${statusText}）。`
+}
+
 function compactJson(source: unknown) {
   try {
     return JSON.stringify(source).slice(0, 360)
@@ -826,13 +889,7 @@ async function postJson(endpoint: string, headers: Record<string, string>, paylo
   const json = parseJsonLikeResponse(text)
 
   if (!response.ok) {
-    const source = json && typeof json === 'object' ? (json as Record<string, unknown>) : {}
-    const error = source.error && typeof source.error === 'object' ? (source.error as Record<string, unknown>) : null
-    const message =
-      (typeof error?.message === 'string' && error.message) ||
-      (typeof source.message === 'string' && source.message) ||
-      `Request failed: ${response.status} ${response.statusText}`
-    throw new Error(message)
+    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText), response.status)
   }
 
   return json
@@ -853,13 +910,7 @@ async function getJson(endpoint: string, headers: Record<string, string>) {
   const json = parseJsonLikeResponse(text)
 
   if (!response.ok) {
-    const source = json && typeof json === 'object' ? (json as Record<string, unknown>) : {}
-    const error = source.error && typeof source.error === 'object' ? (source.error as Record<string, unknown>) : null
-    const message =
-      (typeof error?.message === 'string' && error.message) ||
-      (typeof source.message === 'string' && source.message) ||
-      `Request failed: ${response.status} ${response.statusText}`
-    throw new Error(message)
+    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText), response.status)
   }
 
   return json
@@ -877,25 +928,61 @@ function shouldInlineGrsAiReference(imageUrl: string) {
   }
 }
 
-async function prepareGrsAiReferenceImages(imageUrls: string[]) {
+const supportedReferenceMediaTypes = new Set(['image/jpeg', 'image/png', 'image/webp'])
+const maxReferenceImageBytes = 20 * 1024 * 1024
+const maxTotalReferenceImageBytes = 48 * 1024 * 1024
+
+function validateReferenceImage(image: { buffer: Buffer; mediaType: string }, index: number) {
+  const normalizedMediaType = image.mediaType.split(';')[0].trim().toLowerCase()
+  if (!supportedReferenceMediaTypes.has(normalizedMediaType)) {
+    throw new UpstreamHttpError(`参考图 ${index + 1} 的格式为 ${normalizedMediaType || '未知'}，仅支持 JPG、PNG、WEBP。`, 400)
+  }
+  if (!image.buffer.length) throw new UpstreamHttpError(`参考图 ${index + 1} 内容为空，请重新上传。`, 400)
+  if (image.buffer.length > maxReferenceImageBytes) {
+    throw new UpstreamHttpError(`参考图 ${index + 1} 超过 20 MB，请压缩后重新上传。`, 400)
+  }
+}
+
+async function prepareGrsAiReferenceImages(imageUrls: string[], maxImages: number) {
+  if (imageUrls.length > maxImages) {
+    throw new UpstreamHttpError(`当前模型最多支持 ${maxImages} 张参考图，现已连接 ${imageUrls.length} 张。`, 400)
+  }
+  let totalBytes = 0
   return Promise.all(
-    imageUrls.map(async (imageUrl) => {
+    imageUrls.map(async (imageUrl, index) => {
+      if (imageUrl.startsWith('data:image/')) {
+        const image = parseDataUrl(imageUrl)
+        validateReferenceImage(image, index)
+        totalBytes += image.buffer.length
+        if (totalBytes > maxTotalReferenceImageBytes) throw new UpstreamHttpError('参考图总大小超过 48 MB，请减少图片或先压缩。', 400)
+        return imageUrl
+      }
       if (!shouldInlineGrsAiReference(imageUrl)) return imageUrl
-      return dataUrlFromImage(await loadImageBuffer(imageUrl))
+      const image = await loadImageBuffer(imageUrl)
+      validateReferenceImage(image, index)
+      totalBytes += image.buffer.length
+      if (totalBytes > maxTotalReferenceImageBytes) throw new UpstreamHttpError('参考图总大小超过 48 MB，请减少图片或先压缩。', 400)
+      return dataUrlFromImage(image)
     }),
   )
 }
 
 async function requestGrsAiImage(config: ApiConfig, prompt: string, referenceImageUrls: string[] = []) {
-  const model = normalizeGrsAiModel(config.model)
-  const modelConfig = findGrsAiModel(model) ?? findGrsAiModel(defaultGrsAiModel)
+  const modelSelection = normalizeGrsAiModel(config.model)
+  const modelConfig = findGrsAiModel(modelSelection) ?? findGrsAiModel(defaultGrsAiModel)
+  const model = modelConfig?.value ?? 'gpt-image-2'
+  const family = modelConfig?.family ?? 'gpt-image'
   const endpoint = normalizeGrsAiEndpoint(config.endpoint)
   const headers: Record<string, string> = config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}
+  const outputSize = family === 'gpt-image' ? gptImageSizeFromSize(config.size) : aspectRatioFromSize(config.size)
+  validateGrsAiOutputSize(family, outputSize)
+  const maxReferenceImages = family === 'gpt-image' ? 16 : 14
+  const preparedImages = await prepareGrsAiReferenceImages(referenceImageUrls, maxReferenceImages)
   const payload: Record<string, unknown> = {
     model,
     prompt,
-    images: await prepareGrsAiReferenceImages(referenceImageUrls),
-    aspectRatio: modelConfig?.family === 'gpt-image' ? gptImageSizeFromSize(config.size) : aspectRatioFromSize(config.size),
+    images: preparedImages,
+    aspectRatio: outputSize,
     replyType: 'json',
   }
 
@@ -903,7 +990,15 @@ async function requestGrsAiImage(config: ApiConfig, prompt: string, referenceIma
     payload.imageSize = modelConfig.imageSize
   }
 
-  const created = await postJson(endpoint, headers, payload)
+  let created: unknown
+  try {
+    created = await postJson(endpoint, headers, payload)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '图像接口请求失败'
+    const detailedMessage = `${message}（模型 ${model}，输出 ${outputSize}，参考图 ${preparedImages.length} 张）`
+    if (error instanceof UpstreamHttpError) throw new UpstreamHttpError(detailedMessage, error.statusCode)
+    throw new Error(detailedMessage)
+  }
   const createdFailure = grsAiFailureMessage(created)
   if (createdFailure) throw new Error(createdFailure)
 
@@ -945,13 +1040,15 @@ function referenceImageUrlsFromBody(body: { referenceImageUrl?: string; referenc
   return body.referenceImageUrl ? [body.referenceImageUrl] : []
 }
 
-function buildCustomBody(config: ApiConfig, prompt: string, referenceImageUrl?: string) {
+function buildCustomBody(config: ApiConfig, prompt: string, referenceImageUrl?: string, maskUrl?: string) {
   const filled = (config.bodyTemplate || '')
     .replaceAll('{prompt}', prompt.replaceAll('"', '\\"'))
     .replaceAll('{model}', config.model)
     .replaceAll('{size}', config.size)
     .replaceAll('{referenceImageUrl}', referenceImageUrl?.replaceAll('"', '\\"') || '')
     .replaceAll('{referenceImageBase64}', imagePayloadFromDataUrl(referenceImageUrl))
+    .replaceAll('{maskImageUrl}', maskUrl?.replaceAll('"', '\\"') || '')
+    .replaceAll('{maskImageBase64}', imagePayloadFromDataUrl(maskUrl))
 
   return JSON.parse(filled)
 }
@@ -961,7 +1058,82 @@ function openAiEditEndpoint(endpoint: string) {
   return endpoint
 }
 
-async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string; referenceImageUrl?: string; referenceImageUrls?: string[] }) {
+const change2ProModelsEndpoint = 'https://api.change2pro.com/v1/models'
+
+function isImageGenerationModel(modelId: string) {
+  const id = modelId.trim().toLowerCase().replaceAll('_', '-').replaceAll('.', '-')
+  return [
+    /gpt-?image/,
+    /nano-?banana/,
+    /grok.*(?:image|imagine)/,
+    /gemini.*image/,
+    /(^|-)imagen(?:-|$)/,
+    /(^|-)image2(?:-|$)/,
+    /(^|-)dall-?e(?:-|$)/,
+    /(^|-)flux(?:-|$)/,
+    /(^|-)seedream(?:-|$)/,
+    /qwen-?image/,
+    /(^|-)recraft(?:-|$)/,
+    /(^|-)ideogram(?:-|$)/,
+  ].some((pattern) => pattern.test(id))
+}
+
+function change2ProModelsFromResponse(source: unknown) {
+  if (!source || typeof source !== 'object') return []
+  const root = source as Record<string, unknown>
+  const entries = Array.isArray(root.data)
+    ? root.data
+    : Array.isArray(root.models)
+      ? root.models
+      : []
+
+  return entries
+    .map((entry) => {
+      if (typeof entry === 'string') return { id: entry }
+      if (!entry || typeof entry !== 'object') return null
+      const item = entry as Record<string, unknown>
+      const id = typeof item.id === 'string' ? item.id.trim() : ''
+      const ownedBy = typeof item.owned_by === 'string' ? item.owned_by : undefined
+      return id ? { id, ownedBy } : null
+    })
+    .filter((entry): entry is { id: string; ownedBy: string | undefined } => Boolean(entry?.id))
+    .filter((entry) => isImageGenerationModel(entry.id))
+    .sort((left, right) => left.id.localeCompare(right.id, 'en'))
+}
+
+async function requestChange2ProModelList(apiKey: string) {
+  if (!apiKey.trim()) throw new UpstreamHttpError('请先填写 Change2Pro API Key。', 400)
+
+  let response: Response
+  try {
+    response = await fetch(await validateUpstreamEndpoint(change2ProModelsEndpoint), {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey.trim()}` },
+    })
+  } catch (error) {
+    throw new Error(formatUpstreamFetchError(error, change2ProModelsEndpoint))
+  }
+
+  const text = await response.text()
+  const json = parseJsonLikeResponse(text)
+  if (!response.ok) {
+    const detail = knownErrorText(json)
+    throw new UpstreamHttpError(
+      detail
+        ? `Change2Pro 模型列表读取失败（${response.status}）：${detail}`
+        : `Change2Pro 模型列表读取失败（${response.status} ${response.statusText}）。`,
+      response.status,
+    )
+  }
+
+  const models = change2ProModelsFromResponse(json)
+  if (!models.length) {
+    throw new UpstreamHttpError('当前 Key 没有返回可识别的生图模型，请确认该 Key 所属分组包含图像能力。', 400)
+  }
+  return { models }
+}
+
+async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string; referenceImageUrl?: string; referenceImageUrls?: string[]; maskUrl?: string }) {
   const config = body.config
   const prompt = body.prompt?.trim()
   const referenceImageUrls = referenceImageUrlsFromBody(body)
@@ -973,25 +1145,32 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
   if (config.mode === 'mock') throw new Error('当前仍是本地模拟模式，请切换到 OpenAI 或自定义 API')
   if (!config.endpoint?.trim()) throw new Error('请先填写 API Endpoint')
 
-  const endpoint = config.mode === 'openai' && firstReferenceImageUrl ? openAiEditEndpoint(config.endpoint.trim()) : config.endpoint.trim()
+  const isOpenAiCompatible = config.mode === 'openai' || config.mode === 'change2pro'
+  const endpoint = isOpenAiCompatible && firstReferenceImageUrl ? openAiEditEndpoint(config.endpoint.trim()) : config.endpoint.trim()
   const headers: Record<string, string> = config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}
   let requestBody: string | FormData
 
-  if (config.mode === 'openai' && firstReferenceImageUrl) {
+  if (isOpenAiCompatible && firstReferenceImageUrl) {
     const image = await loadImageBuffer(firstReferenceImageUrl)
+    validateReferenceImage(image, 0)
     const form = new FormData()
     form.append('model', config.model)
     form.append('prompt', prompt)
     form.append('size', config.size)
     form.append('n', '1')
     form.append('image', new Blob([image.buffer], { type: image.mediaType }), `reference${image.extension}`)
+    if (body.maskUrl) {
+      const mask = await loadImageBuffer(body.maskUrl)
+      validateReferenceImage(mask, 0)
+      form.append('mask', new Blob([mask.buffer], { type: mask.mediaType }), `mask${mask.extension}`)
+    }
     requestBody = form
   } else {
     headers['Content-Type'] = 'application/json'
     const upstreamBody =
-      config.mode === 'openai'
+      isOpenAiCompatible
         ? { model: config.model, prompt, size: config.size, n: 1 }
-        : buildCustomBody(config, prompt, firstReferenceImageUrl)
+        : buildCustomBody(config, prompt, firstReferenceImageUrl, body.maskUrl)
     requestBody = JSON.stringify(upstreamBody)
   }
 
@@ -1007,12 +1186,10 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
   }
 
   const text = await response.text()
-  const json = text ? JSON.parse(text) : null
+  const json = parseJsonLikeResponse(text)
 
   if (!response.ok) {
-    const message =
-      typeof json?.error?.message === 'string' ? json.error.message : `请求失败：${response.status} ${response.statusText}`
-    throw new Error(message)
+    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText), response.status)
   }
 
   return json
@@ -1020,6 +1197,24 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
 
 function localImageLibraryPlugin(): Plugin {
   const configureApiServer = (server: Pick<ViteDevServer, 'middlewares'>) => {
+      server.middlewares.use('/api/change2pro/models', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') {
+          next()
+          return
+        }
+
+        try {
+          const body = JSON.parse(await readBody(req)) as { apiKey?: string }
+          const result = await requestChange2ProModelList(body.apiKey || '')
+          sendJson(res, 200, result)
+        } catch (error) {
+          const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
+          sendJson(res, statusCode, {
+            error: error instanceof Error ? error.message : 'Change2Pro 模型列表读取失败',
+          })
+        }
+      })
+
       server.middlewares.use('/api/images/generate', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
         if (req.method !== 'POST') {
           next()
@@ -1038,11 +1233,13 @@ function localImageLibraryPlugin(): Plugin {
             prompt?: string
             referenceImageUrl?: string
             referenceImageUrls?: string[]
+            maskUrl?: string
           }
           const result = await proxyImageGeneration(body)
           sendJson(res, 200, result)
         } catch (error) {
-          sendJson(res, 500, {
+          const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
+          sendJson(res, statusCode, {
             error: error instanceof Error ? error.message : '生成图像失败',
           })
         }

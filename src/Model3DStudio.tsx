@@ -37,6 +37,8 @@ const viewportPresets: ViewportPreset[] = [
   { id: 'landscape', label: '4:3', width: 1200, height: 900 },
   { id: 'wide', label: '16:9', width: 1280, height: 720 },
   { id: 'portrait', label: '3:4', width: 900, height: 1200 },
+  { id: 'vertical', label: '9:16', width: 720, height: 1280 },
+  { id: 'portrait-tall', label: '2:3', width: 800, height: 1200 },
 ]
 
 const defaultModelColor = '#b8c7d6'

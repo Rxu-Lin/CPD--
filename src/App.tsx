@@ -36,6 +36,7 @@ import {
   CheckCircle2,
   Copy,
   Download,
+  Expand,
   FolderOpen,
   Group as GroupIcon,
   History,
@@ -62,15 +63,18 @@ import {
   findGrsAiModel,
   grsAiDefaultEndpoint,
   grsAiModelGroups,
+  grsAiModelSelectionValue,
   normalizeGrsAiEndpoint,
   normalizeGrsAiModel,
 } from './grsaiModels'
 
 const Model3DStudio = lazy(() => import('./Model3DStudio'))
 
-type NodeKind = 'prompt' | 'image' | 'reference' | 'repaint' | 'group'
+type NodeKind = 'prompt' | 'image' | 'reference' | 'repaint' | 'outpaint' | 'group'
 type NodeStatus = 'idle' | 'generating' | 'done' | 'error'
 type RepaintBrushColor = 'red' | 'blue'
+type OutpaintInsets = { top: number; right: number; bottom: number; left: number }
+type OutpaintPreset = AspectRatioValue | 'free'
 type PromptLibraryItem = {
   id: string
   title: string
@@ -138,7 +142,7 @@ function repaintPromptBody(prompt: string) {
 function repaintPromptWithColor(prompt: string, brushColor: RepaintBrushColor) {
   return `${repaintBrushOptions[brushColor].prefix}${repaintPromptBody(prompt)}`
 }
-type ApiMode = 'mock' | 'openai' | 'grsai' | 'custom'
+type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'custom'
 type AspectRatioValue = '16:9' | '3:2' | '4:3' | '1:1' | '3:4' | '2:3' | '9:16'
 
 type ApiConfig = {
@@ -149,6 +153,11 @@ type ApiConfig = {
   size: string
   bodyTemplate: string
   responsePath: string
+}
+
+type Change2ProModelOption = {
+  id: string
+  ownedBy?: string
 }
 
 type GenerationRecord = {
@@ -176,6 +185,10 @@ type WorkflowNodeData = {
   maskUrl?: string
   brushSize?: number
   brushColor?: RepaintBrushColor
+  sourceWidth?: number
+  sourceHeight?: number
+  outpaintInsets?: OutpaintInsets
+  outpaintPreset?: OutpaintPreset
   status: NodeStatus
   model?: string
   size?: string
@@ -198,6 +211,9 @@ type WorkflowNodeData = {
   onChangeBrush?: (id: string, brushSize: number) => void
   onChangeBrushColor?: (id: string, brushColor: RepaintBrushColor) => void
   onClearMask?: (id: string) => void
+  onChangeOutpaintInsets?: (id: string, insets: OutpaintInsets) => void
+  onApplyOutpaintPreset?: (id: string, preset: OutpaintPreset) => void
+  onResetOutpaintPrompt?: (id: string) => void
   onUsePrompt?: (prompt: string) => void
   onRenameGroup?: (id: string) => void
 }
@@ -280,6 +296,7 @@ type GroupDialogState =
   | { mode: 'rename'; groupId: string }
 
 const API_STORAGE_KEY = 'node-banana-api-config'
+const API_PROFILE_STORAGE_KEY_PREFIX = 'node-banana-api-profile:'
 const workflowEdgeColor = 'rgba(255, 255, 255, 0.88)'
 
 const defaultApiConfig: ApiConfig = {
@@ -299,6 +316,34 @@ const grsAiApiConfig: Partial<ApiConfig> = {
   responsePath: 'data.0.url',
 }
 
+const change2ProApiConfig: Partial<ApiConfig> = {
+  mode: 'change2pro',
+  endpoint: 'https://api.change2pro.com/v1/images/generations',
+  model: 'gpt-image-2',
+  responsePath: 'data.0.url',
+}
+
+function apiProfileStorageKey(mode: ApiMode) {
+  return `${API_PROFILE_STORAGE_KEY_PREFIX}${mode}`
+}
+
+function readStoredApiProfile(mode: ApiMode) {
+  try {
+    const saved = window.localStorage.getItem(apiProfileStorageKey(mode))
+    return saved ? (JSON.parse(saved) as Partial<ApiConfig>) : null
+  } catch {
+    return null
+  }
+}
+
+function apiModePreset(mode: ApiMode): Partial<ApiConfig> {
+  if (mode === 'grsai') return grsAiApiConfig
+  if (mode === 'change2pro') return change2ProApiConfig
+  if (mode === 'openai') return { mode, endpoint: defaultApiConfig.endpoint, model: defaultApiConfig.model }
+  if (mode === 'custom') return { mode, endpoint: '', model: '', responsePath: 'data.0.url' }
+  return { ...defaultApiConfig, mode: 'mock' }
+}
+
 const aspectRatioOptions: Array<{
   value: AspectRatioValue
   label: string
@@ -315,6 +360,79 @@ const aspectRatioOptions: Array<{
 ]
 
 const defaultAspectRatioOption = aspectRatioOptions.find((option) => option.value === '1:1') ?? aspectRatioOptions[0]
+
+const OUTPAINT_MAX_DIMENSION = 4096
+const outpaintPresetOptions: OutpaintPreset[] = ['free', '1:1', '4:3', '3:4', '16:9', '9:16', '2:3']
+const defaultOutpaintPrompt = `请在保持原图主体、核心构图、透视关系、镜头焦距、光照方向、色彩、材质和画面风格一致的前提下，智能补全画布新增区域。
+
+自然延续原图边缘的背景、环境、纹理和空间结构，不要拉伸、复制或移动原图主体，不要改变人物面部、姿态、服装、产品形态、文字和标识，不要添加无关主体。
+
+保持阴影、反射、景深、颗粒和清晰度一致，使新增区域与原图自然衔接、没有明显接缝。只生成扩展区域，原图保护区域保持不变。`
+
+function outpaintTargetSize(sourceWidth: number, sourceHeight: number, insets: OutpaintInsets) {
+  return {
+    width: Math.round(sourceWidth + insets.left + insets.right),
+    height: Math.round(sourceHeight + insets.top + insets.bottom),
+  }
+}
+
+function nearestAspectRatioOption(width: number, height: number) {
+  const ratio = width / height
+  return aspectRatioOptions.reduce((closest, option) => {
+    const [optionWidth, optionHeight] = option.size.split('x').map(Number)
+    return Math.abs(optionWidth / optionHeight - ratio) < Math.abs(parseImageSize(closest.size).width / parseImageSize(closest.size).height - ratio)
+      ? option
+      : closest
+  }, defaultAspectRatioOption)
+}
+
+function defaultOutpaintInsets(sourceWidth: number, sourceHeight: number): OutpaintInsets {
+  const horizontal = Math.min(Math.round(sourceWidth * 0.18), Math.floor((OUTPAINT_MAX_DIMENSION - sourceWidth) / 2))
+  const vertical = Math.min(Math.round(sourceHeight * 0.18), Math.floor((OUTPAINT_MAX_DIMENSION - sourceHeight) / 2))
+  return { top: Math.max(0, vertical), right: Math.max(0, horizontal), bottom: Math.max(0, vertical), left: Math.max(0, horizontal) }
+}
+
+function outpaintInsetsForPreset(sourceWidth: number, sourceHeight: number, preset: OutpaintPreset): OutpaintInsets {
+  if (preset === 'free') return defaultOutpaintInsets(sourceWidth, sourceHeight)
+  const [ratioWidth, ratioHeight] = preset.split(':').map(Number)
+  const ratio = ratioWidth / ratioHeight
+  let targetWidth = Math.round(sourceWidth * 1.2)
+  let targetHeight = Math.round(sourceHeight * 1.2)
+  if (targetWidth / targetHeight > ratio) targetHeight = Math.ceil(targetWidth / ratio)
+  else targetWidth = Math.ceil(targetHeight * ratio)
+  const scale = Math.min(1, OUTPAINT_MAX_DIMENSION / Math.max(targetWidth, targetHeight))
+  targetWidth = Math.max(sourceWidth, Math.round(targetWidth * scale))
+  targetHeight = Math.max(sourceHeight, Math.round(targetHeight * scale))
+  const horizontal = Math.max(0, targetWidth - sourceWidth)
+  const vertical = Math.max(0, targetHeight - sourceHeight)
+  return {
+    top: Math.floor(vertical / 2),
+    right: Math.ceil(horizontal / 2),
+    bottom: Math.ceil(vertical / 2),
+    left: Math.floor(horizontal / 2),
+  }
+}
+
+function fitSourceForOutpaint(width: number, height: number) {
+  const scale = Math.min(1, 3072 / Math.max(width, height))
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) }
+}
+
+function outpaintDirectionSummary(insets: OutpaintInsets) {
+  const directions = [
+    insets.top > 0 ? '上方' : '',
+    insets.right > 0 ? '右侧' : '',
+    insets.bottom > 0 ? '下方' : '',
+    insets.left > 0 ? '左侧' : '',
+  ].filter(Boolean)
+  return directions.join('、') || '无'
+}
+
+function outpaintGenerationPrompt(prompt: string, sourceWidth: number, sourceHeight: number, insets: OutpaintInsets) {
+  const target = outpaintTargetSize(sourceWidth, sourceHeight, insets)
+  const ratio = nearestAspectRatioOption(target.width, target.height).label
+  return `${prompt.trim() || defaultOutpaintPrompt}\n\n扩图参数：向${outpaintDirectionSummary(insets)}扩展；上 ${insets.top}px、右 ${insets.right}px、下 ${insets.bottom}px、左 ${insets.left}px；目标比例约 ${ratio}；原图 ${sourceWidth} × ${sourceHeight}px；最终画布 ${target.width} × ${target.height}px。`
+}
 
 const referenceImageRatios = [
   { label: '16:9', value: 16 / 9 },
@@ -375,8 +493,8 @@ function numericNodeDimension(value: unknown) {
 }
 
 function getWorkflowNodeSize(node: WorkflowNode) {
-  const fallbackWidth = node.data.kind === 'repaint' ? 360 : node.data.kind === 'image' || node.data.kind === 'prompt' ? 330 : 312
-  const fallbackHeight = node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' ? 480 : node.data.kind === 'reference' ? 360 : 250
+  const fallbackWidth = node.data.kind === 'outpaint' ? 410 : node.data.kind === 'repaint' ? 360 : node.data.kind === 'image' || node.data.kind === 'prompt' ? 330 : 312
+  const fallbackHeight = node.data.kind === 'outpaint' ? 780 : node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' ? 480 : node.data.kind === 'reference' ? 360 : 250
   return {
     width: node.measured?.width || node.width || numericNodeDimension(node.style?.width) || fallbackWidth,
     height: node.measured?.height || node.height || numericNodeDimension(node.style?.height) || fallbackHeight,
@@ -430,6 +548,9 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onChangeBrush,
     onChangeBrushColor,
     onClearMask,
+    onChangeOutpaintInsets,
+    onApplyOutpaintPreset,
+    onResetOutpaintPrompt,
     onUsePrompt,
     onRenameGroup,
     memberCount,
@@ -446,6 +567,9 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onChangeBrush
   void onChangeBrushColor
   void onClearMask
+  void onChangeOutpaintInsets
+  void onApplyOutpaintPreset
+  void onResetOutpaintPrompt
   void onUsePrompt
   void onRenameGroup
   void memberCount
@@ -722,7 +846,7 @@ function imageFromResponse(source: unknown, responsePath: string) {
   return `data:image/png;base64,${value}`
 }
 
-async function requestGeneratedImage(prompt: string, config: ApiConfig, referenceImageUrls: string[] = []) {
+async function requestGeneratedImage(prompt: string, config: ApiConfig, referenceImageUrls: string[] = [], maskUrl?: string) {
   if (config.mode === 'mock') {
     await new Promise((resolve) => window.setTimeout(resolve, 650))
     return createMockImage(prompt, config.size)
@@ -731,7 +855,7 @@ async function requestGeneratedImage(prompt: string, config: ApiConfig, referenc
   const response = await fetch('/api/images/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, config, referenceImageUrls }),
+    body: JSON.stringify({ prompt, config, referenceImageUrls, maskUrl }),
   })
 
   const json = await response.json().catch(() => null)
@@ -741,6 +865,23 @@ async function requestGeneratedImage(prompt: string, config: ApiConfig, referenc
   }
 
   return imageFromResponse(json, config.responsePath)
+}
+
+async function requestChange2ProModels(apiKey: string) {
+  const response = await fetch('/api/change2pro/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey }),
+  })
+  const payload = (await response.json().catch(() => null)) as
+    | { models?: Change2ProModelOption[]; error?: string }
+    | null
+
+  if (!response.ok) {
+    throw new Error(payload?.error || `模型列表读取失败：${response.status} ${response.statusText}`)
+  }
+  if (!payload?.models?.length) throw new Error('当前 Key 没有返回可识别的生图模型。')
+  return payload.models
 }
 
 async function imageAsDataUrl(imageUrl: string) {
@@ -773,6 +914,59 @@ async function cacheCanvasImage(imageUrl: string) {
   const payload = (await response.json().catch(() => null)) as { imageUrl?: string; error?: string } | null
   if (!response.ok || !payload?.imageUrl) throw new Error(payload?.error || '重绘结果缓存失败')
   return payload.imageUrl
+}
+
+async function prepareOutpaintInputs(
+  sourceImageUrl: string,
+  sourceWidth: number,
+  sourceHeight: number,
+  insets: OutpaintInsets,
+) {
+  const sourceImage = await loadCanvasImage(await imageAsDataUrl(sourceImageUrl))
+  const target = outpaintTargetSize(sourceWidth, sourceHeight, insets)
+  const referenceCanvas = document.createElement('canvas')
+  const maskCanvas = document.createElement('canvas')
+  referenceCanvas.width = maskCanvas.width = target.width
+  referenceCanvas.height = maskCanvas.height = target.height
+  const referenceContext = referenceCanvas.getContext('2d')
+  const maskContext = maskCanvas.getContext('2d')
+  if (!referenceContext || !maskContext) throw new Error('浏览器无法准备扩图画布。')
+
+  referenceContext.imageSmoothingEnabled = true
+  referenceContext.imageSmoothingQuality = 'high'
+  referenceContext.drawImage(sourceImage, insets.left, insets.top, sourceWidth, sourceHeight)
+  maskContext.clearRect(0, 0, target.width, target.height)
+  maskContext.fillStyle = '#000000'
+  maskContext.fillRect(insets.left, insets.top, sourceWidth, sourceHeight)
+
+  return {
+    referenceImageUrl: referenceCanvas.toDataURL('image/png'),
+    maskUrl: maskCanvas.toDataURL('image/png'),
+  }
+}
+
+async function compositeOutpaintResult(
+  sourceImageUrl: string,
+  generatedImageUrl: string,
+  sourceWidth: number,
+  sourceHeight: number,
+  insets: OutpaintInsets,
+) {
+  const [sourceImage, generatedImage] = await Promise.all([
+    loadCanvasImage(await imageAsDataUrl(sourceImageUrl)),
+    loadCanvasImage(await imageAsDataUrl(generatedImageUrl)),
+  ])
+  const target = outpaintTargetSize(sourceWidth, sourceHeight, insets)
+  const canvas = document.createElement('canvas')
+  canvas.width = target.width
+  canvas.height = target.height
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('浏览器无法合成扩图结果。')
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(generatedImage, 0, 0, target.width, target.height)
+  context.drawImage(sourceImage, insets.left, insets.top, sourceWidth, sourceHeight)
+  return cacheCanvasImage(canvas.toDataURL('image/png'))
 }
 
 async function compositeRepaintResult(sourceImageUrl: string, generatedImageUrl: string, maskUrl: string) {
@@ -973,6 +1167,161 @@ function RepaintMaskEditor({
   )
 }
 
+type OutpaintRangeEditorProps = {
+  sourceImageUrl?: string
+  resultImageUrl?: string
+  sourceWidth: number
+  sourceHeight: number
+  insets: OutpaintInsets
+  preset: OutpaintPreset
+  disabled: boolean
+  onChange: (insets: OutpaintInsets) => void
+  onApplyPreset: (preset: OutpaintPreset) => void
+}
+
+type OutpaintHandle = 'top' | 'right' | 'bottom' | 'left' | 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left'
+
+function OutpaintRangeEditor({
+  sourceImageUrl,
+  resultImageUrl,
+  sourceWidth,
+  sourceHeight,
+  insets,
+  preset,
+  disabled,
+  onChange,
+  onApplyPreset,
+}: OutpaintRangeEditorProps) {
+  const stageRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<{
+    handle: OutpaintHandle
+    pointerId: number
+    x: number
+    y: number
+    width: number
+    height: number
+    insets: OutpaintInsets
+  } | null>(null)
+  const target = outpaintTargetSize(sourceWidth, sourceHeight, insets)
+  const sourceStyle = {
+    left: `${(insets.left / target.width) * 100}%`,
+    top: `${(insets.top / target.height) * 100}%`,
+    width: `${(sourceWidth / target.width) * 100}%`,
+    height: `${(sourceHeight / target.height) * 100}%`,
+  }
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>, handle: OutpaintHandle) => {
+    if (disabled || !stageRef.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = stageRef.current.getBoundingClientRect()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    dragRef.current = {
+      handle,
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      width: Math.max(1, rect.width),
+      height: Math.max(1, rect.height),
+      insets: { ...insets },
+    }
+  }
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId || disabled) return
+    event.preventDefault()
+    const startTarget = outpaintTargetSize(sourceWidth, sourceHeight, drag.insets)
+    const dx = Math.round(((event.clientX - drag.x) / drag.width) * startTarget.width)
+    const dy = Math.round(((event.clientY - drag.y) / drag.height) * startTarget.height)
+    const next = { ...drag.insets }
+    const maxLeft = OUTPAINT_MAX_DIMENSION - sourceWidth - drag.insets.right
+    const maxRight = OUTPAINT_MAX_DIMENSION - sourceWidth - drag.insets.left
+    const maxTop = OUTPAINT_MAX_DIMENSION - sourceHeight - drag.insets.bottom
+    const maxBottom = OUTPAINT_MAX_DIMENSION - sourceHeight - drag.insets.top
+
+    if (drag.handle.includes('left')) next.left = Math.max(0, Math.min(maxLeft, drag.insets.left - dx))
+    if (drag.handle.includes('right')) next.right = Math.max(0, Math.min(maxRight, drag.insets.right + dx))
+    if (drag.handle.includes('top')) next.top = Math.max(0, Math.min(maxTop, drag.insets.top - dy))
+    if (drag.handle.includes('bottom')) next.bottom = Math.max(0, Math.min(maxBottom, drag.insets.bottom + dy))
+    onChange(next)
+  }
+
+  const stopDragging = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null
+  }
+
+  const handles: Array<{ value: OutpaintHandle; label: string }> = [
+    { value: 'top', label: '拖动上边界' },
+    { value: 'right', label: '拖动右边界' },
+    { value: 'bottom', label: '拖动下边界' },
+    { value: 'left', label: '拖动左边界' },
+    { value: 'top-left', label: '拖动左上角' },
+    { value: 'top-right', label: '拖动右上角' },
+    { value: 'bottom-right', label: '拖动右下角' },
+    { value: 'bottom-left', label: '拖动左下角' },
+  ]
+
+  return (
+    <section className="outpaint-editor nodrag nopan nowheel" aria-label="扩图范围编辑器">
+      <div className="outpaint-editor-heading">
+        <span>扩展范围</span>
+        <output>{target.width} × {target.height}px</output>
+      </div>
+      <div
+        ref={stageRef}
+        className="outpaint-stage"
+        style={{ aspectRatio: `${target.width} / ${target.height}` }}
+      >
+        {resultImageUrl && <img className="outpaint-result" src={resultImageUrl} alt="扩图结果" draggable={false} />}
+        {sourceImageUrl ? (
+          <img className="outpaint-source" src={sourceImageUrl} alt="原图保护区域" draggable={false} style={sourceStyle} />
+        ) : (
+          <div className="outpaint-source outpaint-source-empty" style={sourceStyle}><ImageIcon size={24} /></div>
+        )}
+        <div className="outpaint-protected-outline" style={sourceStyle}>
+          <span>原图保护区</span>
+        </div>
+        {handles.map((handle) => (
+          <button
+            key={handle.value}
+            type="button"
+            className={`outpaint-handle ${handle.value}`}
+            aria-label={handle.label}
+            title={handle.label}
+            disabled={disabled}
+            onPointerDown={(event) => handlePointerDown(event, handle.value)}
+            onPointerMove={handlePointerMove}
+            onPointerUp={stopDragging}
+            onPointerCancel={stopDragging}
+          />
+        ))}
+      </div>
+      <div className="outpaint-inset-values" aria-label="四向扩展像素">
+        <span>上 <strong>{insets.top}</strong></span>
+        <span>右 <strong>{insets.right}</strong></span>
+        <span>下 <strong>{insets.bottom}</strong></span>
+        <span>左 <strong>{insets.left}</strong></span>
+      </div>
+      <div className="outpaint-presets" role="group" aria-label="扩图比例">
+        {outpaintPresetOptions.map((option) => (
+          <button
+            key={option}
+            type="button"
+            className={preset === option ? 'active' : ''}
+            aria-pressed={preset === option}
+            disabled={disabled}
+            onClick={() => onApplyPreset(option)}
+          >
+            {option === 'free' ? '自由' : option}
+          </button>
+        ))}
+      </div>
+      <p className="outpaint-editor-hint">拖动外框四边或四角，原图区域始终保持不变。</p>
+    </section>
+  )
+}
+
 function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const updateNodeInternals = useUpdateNodeInternals()
   const replaceImageInputRef = useRef<HTMLInputElement>(null)
@@ -985,6 +1334,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const isPrompt = data.kind === 'prompt'
   const isReference = data.kind === 'reference'
   const isRepaint = data.kind === 'repaint'
+  const isOutpaint = data.kind === 'outpaint'
   const isGroup = data.kind === 'group'
   const isGenerating = data.status === 'generating'
   const isDone = data.status === 'done'
@@ -992,6 +1342,10 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const selectedAspectRatio = getAspectRatioOption(data.size)
   const brushSize = data.brushSize || 36
   const brushColor = data.brushColor || 'red'
+  const sourceWidth = data.sourceWidth || 1024
+  const sourceHeight = data.sourceHeight || 1024
+  const outpaintInsets = data.outpaintInsets || defaultOutpaintInsets(sourceWidth, sourceHeight)
+  const outpaintPreset = data.outpaintPreset || 'free'
   const configuredModelName = data.model?.trim() || ''
   const nodeTitle = isReference
     ? (data.sourceName || data.title)
@@ -1053,25 +1407,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
   return (
     <div className={`workflow-node ${selected ? 'selected' : ''} ${data.kind}`}>
-      {(isImage || isRepaint) && (
+      {(isImage || isRepaint || isOutpaint) && (
         <>
-          <span className="node-port-label prompt-input-label" style={{ top: inputPortTop(0) }} aria-hidden="true">
-            <Wand2 size={13} />
-            Prompt
-          </span>
-          <Handle
-            id="prompt"
-            type="target"
-            position={Position.Left}
-            className={`node-handle prompt-input-handle ${data.promptInputConnected ? 'connected' : ''}`}
-            style={{ top: inputPortTop(0) }}
-            isConnectable={!data.promptInputConnected}
-            aria-label="Prompt 输入"
-            title="连接提示词节点"
-          />
           {imageInputSlots.map((slot, index) => {
             const label = isImage ? `Image ${slot.index}` : 'Image'
-            const top = inputPortTop(index + 1)
+            const top = inputPortTop(index)
             return [
               <span key={`${slot.id}-label`} className="node-port-label image-input-label" style={{ top }} aria-hidden="true">
                 <ImageIcon size={13} />
@@ -1090,12 +1430,32 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               />,
             ]
           })}
+          <span
+            className="node-port-label prompt-input-label"
+            style={{ top: inputPortTop(imageInputSlots.length) }}
+            aria-hidden="true"
+          >
+            <Wand2 size={13} />
+            Prompt
+          </span>
+          <Handle
+            id="prompt"
+            type="target"
+            position={Position.Left}
+            className={`node-handle prompt-input-handle ${data.promptInputConnected ? 'connected' : ''}`}
+            style={{ top: inputPortTop(imageInputSlots.length) }}
+            isConnectable={!data.promptInputConnected}
+            aria-label="Prompt 输入"
+            title="连接提示词节点"
+          />
         </>
       )}
       <div className="node-head">
         <div className="node-title">
           {isRepaint ? (
             <Brush size={15} />
+          ) : isOutpaint ? (
+            <Expand size={15} />
           ) : isImage ? (
             <ImageIcon size={15} />
           ) : isReference ? (
@@ -1118,7 +1478,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           >
             {referenceImageRatio}
           </div>
-        ) : (isImage || isRepaint) ? (
+        ) : (isImage || isRepaint || isOutpaint) ? (
           <button
             className="node-delete-button nodrag nopan"
             type="button"
@@ -1138,13 +1498,20 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
         )}
       </div>
 
-      {(isPrompt || isRepaint) ? (
+      {(isPrompt || isRepaint || isOutpaint) ? (
         <label className="image-prompt-control nodrag nopan nowheel">
-          <span>提示词</span>
+          <span className="image-prompt-heading">
+            <span>提示词</span>
+            {isOutpaint && (
+              <button type="button" onClick={() => data.onResetOutpaintPrompt?.(nodeId)} disabled={isGenerating}>
+                恢复默认
+              </button>
+            )}
+          </span>
           <textarea
             value={promptDraft}
-            rows={isRepaint ? 4 : 5}
-            placeholder={isRepaint ? '描述涂抹区域要重绘成什么' : '输入提示词'}
+            rows={isRepaint ? 4 : isOutpaint ? 6 : 5}
+            placeholder={isRepaint ? '描述涂抹区域要重绘成什么' : isOutpaint ? '描述希望扩展出的画面内容' : '输入提示词'}
             onCompositionStart={() => {
               isPromptComposingRef.current = true
             }}
@@ -1167,7 +1534,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       )}
 
       {(isImage || isReference) && (
-        data.imageUrl ? (
+        data.imageUrl && !isGenerating ? (
           <img
             className="node-image"
             src={data.imageUrl}
@@ -1182,9 +1549,22 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             }}
           />
         ) : (
-          <div className="node-empty" style={isImage ? { aspectRatio: selectedAspectRatio.cssRatio } : undefined}>
-            <ImageIcon size={28} />
-            <span>{isGenerating ? '正在调用图像接口...' : '等待图像'}</span>
+          <div
+            className={`node-empty ${isGenerating ? 'generating' : ''}`}
+            style={isImage ? { aspectRatio: selectedAspectRatio.cssRatio } : undefined}
+            aria-live="polite"
+          >
+            {isGenerating ? (
+              <div className="node-generation-field" role="status" aria-label="正在生成图像">
+                <span className="node-generation-frame" aria-hidden="true" />
+                <span className="node-generation-copy">正在生成...</span>
+              </div>
+            ) : (
+              <>
+                <ImageIcon size={28} />
+                <span>等待图像</span>
+              </>
+            )}
           </div>
         )
       )}
@@ -1237,6 +1617,20 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             </button>
           </div>
         </>
+      )}
+
+      {isOutpaint && (
+        <OutpaintRangeEditor
+          sourceImageUrl={data.sourceImageUrl}
+          resultImageUrl={data.imageUrl}
+          sourceWidth={sourceWidth}
+          sourceHeight={sourceHeight}
+          insets={outpaintInsets}
+          preset={outpaintPreset}
+          disabled={isGenerating}
+          onChange={(insets) => data.onChangeOutpaintInsets?.(nodeId, insets)}
+          onApplyPreset={(preset) => data.onApplyOutpaintPreset?.(nodeId, preset)}
+        />
       )}
 
       {data.error && <div className="node-error">{data.error}</div>}
@@ -1304,17 +1698,17 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 <Download size={14} />
               </button>
             )}
-            {(isImage || isRepaint) && data.imageUrl && (
+            {(isImage || isRepaint || isOutpaint) && data.imageUrl && (
               <button type="button" title="保存并查看所在文件夹" onClick={() => data.onRevealImage?.(nodeId)}>
                 <FolderOpen size={14} />
               </button>
             )}
-            {(isImage || isRepaint) ? (
+            {(isImage || isRepaint || isOutpaint) ? (
               <button
                 className="node-run-button nodrag nopan"
                 type="button"
-                title={isGenerating ? '正在生成' : isRepaint ? '运行重绘' : '运行生成'}
-                aria-label={isGenerating ? '正在生成' : isRepaint ? '运行重绘' : '运行生成'}
+                title={isGenerating ? '正在生成' : isRepaint ? '运行重绘' : isOutpaint ? '运行扩图' : '运行生成'}
+                aria-label={isGenerating ? '正在生成' : isRepaint ? '运行重绘' : isOutpaint ? '运行扩图' : '运行生成'}
                 onClick={() => data.onGenerate?.(nodeId)}
                 disabled={isGenerating}
               >
@@ -1341,6 +1735,8 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               ? '向右拖出重绘生成节点'
               : isRepaint
                 ? '重绘完成后向右拖出生成图像框'
+                : isOutpaint
+                  ? '扩图完成后向右拖出生成图像框'
                 : undefined
         }
       />
@@ -1430,6 +1826,10 @@ export default function App() {
   const [groupDialog, setGroupDialog] = useState<GroupDialogState | null>(null)
   const [groupNameDraft, setGroupNameDraft] = useState('')
   const [apiConfig, setApiConfig] = useState<ApiConfig>(() => readStoredApiConfig())
+  const [change2ProModels, setChange2ProModels] = useState<Change2ProModelOption[]>([])
+  const [change2ProModelStatus, setChange2ProModelStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [change2ProModelMessage, setChange2ProModelMessage] = useState('')
+  const change2ProModelRequestIdRef = useRef(0)
   const [history, setHistory] = useState<GenerationRecord[]>([])
   const [isExporting, setIsExporting] = useState(false)
   const [, setToast] = useState('已准备好，默认使用本地模拟生成。')
@@ -1437,6 +1837,43 @@ export default function App() {
   const [welcomeTitleIndex, setWelcomeTitleIndex] = useState(0)
 
   const markDirty = useCallback(() => setDirty(true), [])
+
+  const loadChange2ProModels = useCallback(async () => {
+    const apiKey = apiConfig.apiKey.trim()
+    if (!apiKey) {
+      setChange2ProModels([])
+      setChange2ProModelStatus('idle')
+      setChange2ProModelMessage('请先填写 Change2Pro API Key。')
+      return
+    }
+
+    const requestId = change2ProModelRequestIdRef.current + 1
+    change2ProModelRequestIdRef.current = requestId
+    setChange2ProModelStatus('loading')
+    setChange2ProModelMessage('正在读取当前 Key 可用的生图模型…')
+
+    try {
+      const models = await requestChange2ProModels(apiKey)
+      if (change2ProModelRequestIdRef.current !== requestId) return
+      setChange2ProModels(models)
+      setChange2ProModelStatus('success')
+      setChange2ProModelMessage(`已读取 ${models.length} 个生图模型。`)
+      setApiConfig((current) => {
+        if (current.mode !== 'change2pro' || current.apiKey.trim() !== apiKey) return current
+        if (models.some((model) => model.id === current.model)) return current
+        const next = { ...current, model: models[0].id }
+        window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
+        window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
+        return next
+      })
+    } catch (error) {
+      if (change2ProModelRequestIdRef.current !== requestId) return
+      const message = error instanceof Error ? error.message : '模型列表读取失败。'
+      setChange2ProModels([])
+      setChange2ProModelStatus('error')
+      setChange2ProModelMessage(message)
+    }
+  }, [apiConfig.apiKey])
 
   useEffect(() => {
     setEdges((current) => normalizeImageInputEdges(current, nodes))
@@ -1455,6 +1892,21 @@ export default function App() {
 
     return () => window.clearInterval(interval)
   }, [nodes.length, welcomeDismissed])
+
+  useEffect(() => {
+    if (!showSettings || apiConfig.mode !== 'change2pro') return
+    if (apiConfig.apiKey.trim().length < 8) {
+      setChange2ProModels([])
+      setChange2ProModelStatus('idle')
+      setChange2ProModelMessage('填写 Change2Pro API Key 后将自动读取生图模型。')
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      void loadChange2ProModels()
+    }, 500)
+    return () => window.clearTimeout(timer)
+  }, [apiConfig.apiKey, apiConfig.mode, loadChange2ProModels, showSettings])
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<WorkflowNode>[]) => {
@@ -1478,7 +1930,7 @@ export default function App() {
       const targetNode = nodes.find((node) => node.id === connection.target)
       const targetsImageInput = isImageInputHandle(connection.targetHandle)
 
-      if (targetNode?.data.kind === 'image' || targetNode?.data.kind === 'repaint') {
+      if (targetNode?.data.kind === 'image' || targetNode?.data.kind === 'repaint' || targetNode?.data.kind === 'outpaint') {
         if (targetsImageInput && sourceNode?.data.kind === 'prompt') {
           setToast('提示词节点请连接到 Prompt 输入。')
           return
@@ -1501,9 +1953,45 @@ export default function App() {
         )
         return normalizeImageInputEdges(connected, nodes)
       })
+      if (targetNode?.data.kind === 'outpaint' && targetsImageInput && sourceNode?.data.imageUrl) {
+        void (async () => {
+          try {
+            const sourceImage = await loadCanvasImage(await imageAsDataUrl(sourceNode.data.imageUrl as string))
+            const sourceSize = fitSourceForOutpaint(sourceImage.naturalWidth, sourceImage.naturalHeight)
+            const outpaintPreset = targetNode.data.outpaintPreset || 'free'
+            const outpaintInsets = outpaintPreset === 'free'
+              ? defaultOutpaintInsets(sourceSize.width, sourceSize.height)
+              : outpaintInsetsForPreset(sourceSize.width, sourceSize.height, outpaintPreset)
+            const target = outpaintTargetSize(sourceSize.width, sourceSize.height, outpaintInsets)
+            setNodes((current) =>
+              current.map((node) =>
+                node.id === targetNode.id
+                  ? {
+                      ...node,
+                      data: {
+                        ...node.data,
+                        sourceImageUrl: sourceNode.data.imageUrl,
+                        sourceWidth: sourceSize.width,
+                        sourceHeight: sourceSize.height,
+                        outpaintInsets,
+                        size: nearestAspectRatioOption(target.width, target.height).size,
+                        imageUrl: undefined,
+                        status: 'idle',
+                        error: undefined,
+                      },
+                    }
+                  : node,
+              ),
+            )
+            setToast('图片已连接，扩图范围已按原图尺寸更新。')
+          } catch {
+            setToast('图片已连接，但暂时无法读取原图尺寸。')
+          }
+        })()
+      }
       markDirty()
     },
-    [markDirty, nodes, setEdges],
+    [markDirty, nodes, setEdges, setNodes],
   )
 
   const updateNodeData = useCallback(
@@ -1789,6 +2277,51 @@ export default function App() {
     [updateNodeData],
   )
 
+  const changeNodeOutpaintInsets = useCallback(
+    (nodeId: string, outpaintInsets: OutpaintInsets) => {
+      const node = nodes.find((item) => item.id === nodeId)
+      if (!node) return
+      const target = outpaintTargetSize(node.data.sourceWidth || 1024, node.data.sourceHeight || 1024, outpaintInsets)
+      updateNodeData(nodeId, {
+        outpaintInsets,
+        outpaintPreset: 'free',
+        size: nearestAspectRatioOption(target.width, target.height).size,
+        imageUrl: undefined,
+        status: 'idle',
+      })
+    },
+    [nodes, updateNodeData],
+  )
+
+  const applyNodeOutpaintPreset = useCallback(
+    (nodeId: string, outpaintPreset: OutpaintPreset) => {
+      const node = nodes.find((item) => item.id === nodeId)
+      if (!node) return
+      const sourceWidth = node.data.sourceWidth || 1024
+      const sourceHeight = node.data.sourceHeight || 1024
+      const outpaintInsets = outpaintPreset === 'free'
+        ? (node.data.outpaintInsets || defaultOutpaintInsets(sourceWidth, sourceHeight))
+        : outpaintInsetsForPreset(sourceWidth, sourceHeight, outpaintPreset)
+      const target = outpaintTargetSize(sourceWidth, sourceHeight, outpaintInsets)
+      updateNodeData(nodeId, {
+        outpaintInsets,
+        outpaintPreset,
+        size: nearestAspectRatioOption(target.width, target.height).size,
+        imageUrl: undefined,
+        status: 'idle',
+      })
+    },
+    [nodes, updateNodeData],
+  )
+
+  const resetOutpaintPrompt = useCallback(
+    (nodeId: string) => {
+      updateNodeData(nodeId, { prompt: defaultOutpaintPrompt })
+      setToast('已恢复通用扩图提示词。')
+    },
+    [updateNodeData],
+  )
+
   const createReferenceOutput = useCallback(
     async (
       sourceNode: WorkflowNode,
@@ -1948,6 +2481,13 @@ export default function App() {
         }
         void createReferenceOutput(sourceNode, dropPosition)
       }
+      if (sourceNode.data.kind === 'outpaint') {
+        if (!sourceNode.data.imageUrl) {
+          setToast('请先完成扩图，再从右侧拖出生成图像框。')
+          return
+        }
+        void createReferenceOutput(sourceNode, dropPosition)
+      }
     },
     [createReferenceOutput, createRepaintOutput, flowInstance, nodes],
   )
@@ -1967,7 +2507,7 @@ export default function App() {
       const clientPosition = { x: event.clientX, y: event.clientY }
       const menuPosition = {
         x: Math.min(clientPosition.x, window.innerWidth - 210),
-        y: Math.min(clientPosition.y, window.innerHeight - 132),
+        y: Math.min(clientPosition.y, window.innerHeight - 176),
       }
       const flowPosition =
         flowInstance?.screenToFlowPosition(clientPosition, {
@@ -2023,7 +2563,7 @@ export default function App() {
       ...node,
       data: {
         ...node.data,
-        model: (node.data.kind === 'image' || node.data.kind === 'repaint') ? apiConfig.model : node.data.model,
+        model: (node.data.kind === 'image' || node.data.kind === 'repaint' || node.data.kind === 'outpaint') ? apiConfig.model : node.data.model,
         promptInputConnected,
         imageInputConnected: imageInputEdges.length > 0,
         imageInputSlots,
@@ -2040,6 +2580,9 @@ export default function App() {
         onChangeBrush: changeNodeBrush,
         onChangeBrushColor: changeNodeBrushColor,
         onClearMask: clearNodeMask,
+        onChangeOutpaintInsets: changeNodeOutpaintInsets,
+        onApplyOutpaintPreset: applyNodeOutpaintPreset,
+        onResetOutpaintPrompt: resetOutpaintPrompt,
         onUsePrompt: useNodePrompt,
         onRenameGroup: openRenameGroupDialog,
       },
@@ -2397,6 +2940,136 @@ export default function App() {
     }
   }
 
+  async function generateOutpaintInNode(nodeId: string) {
+    const node = nodes.find((item) => item.id === nodeId)
+    if (!node || node.data.kind !== 'outpaint') return
+
+    const sourceNodes = edges
+      .filter((edge) => edge.target === nodeId)
+      .map((edge) => nodes.find((item) => item.id === edge.source))
+      .filter((item): item is WorkflowNode => Boolean(item))
+    const imageSourceNode = sourceNodes.find((item) => item.data.kind !== 'prompt' && item.data.imageUrl)
+    const promptSourceNode = sourceNodes.find((item) => item.data.kind === 'prompt' && item.data.prompt?.trim())
+    const sourceImageUrl = imageSourceNode?.data.imageUrl || node.data.sourceImageUrl
+    let sourceWidth = node.data.sourceWidth || 1024
+    let sourceHeight = node.data.sourceHeight || 1024
+    let outpaintInsets = node.data.outpaintInsets || defaultOutpaintInsets(sourceWidth, sourceHeight)
+    const trimmed = promptSourceNode?.data.prompt?.trim() || node.data.prompt?.trim() || defaultOutpaintPrompt
+
+    if (!sourceImageUrl) {
+      updateNodeData(nodeId, { status: 'error', error: '请先连接一张需要扩展的图像到 Image 输入。' })
+      return
+    }
+    if (imageSourceNode?.data.imageUrl && imageSourceNode.data.imageUrl !== node.data.sourceImageUrl) {
+      try {
+        const sourceImage = await loadCanvasImage(await imageAsDataUrl(imageSourceNode.data.imageUrl))
+        const sourceSize = fitSourceForOutpaint(sourceImage.naturalWidth, sourceImage.naturalHeight)
+        sourceWidth = sourceSize.width
+        sourceHeight = sourceSize.height
+        const outpaintPreset = node.data.outpaintPreset || 'free'
+        outpaintInsets = outpaintPreset === 'free'
+          ? defaultOutpaintInsets(sourceWidth, sourceHeight)
+          : outpaintInsetsForPreset(sourceWidth, sourceHeight, outpaintPreset)
+        updateNodeData(nodeId, {
+          sourceImageUrl,
+          sourceWidth,
+          sourceHeight,
+          outpaintInsets,
+          imageUrl: undefined,
+          status: 'idle',
+          error: undefined,
+        })
+      } catch {
+        updateNodeData(nodeId, { status: 'error', error: '无法读取连接图片的尺寸，请重新连接图片。' })
+        return
+      }
+    }
+    const target = outpaintTargetSize(sourceWidth, sourceHeight, outpaintInsets)
+    if (target.width > OUTPAINT_MAX_DIMENSION || target.height > OUTPAINT_MAX_DIMENSION) {
+      updateNodeData(nodeId, { status: 'error', error: '扩图后的最长边不能超过 4096px。' })
+      return
+    }
+    if (!outpaintInsets.top && !outpaintInsets.right && !outpaintInsets.bottom && !outpaintInsets.left) {
+      updateNodeData(nodeId, { status: 'error', error: '请拖动外框，至少增加一个方向的扩展区域。' })
+      return
+    }
+
+    const ratioOption = nearestAspectRatioOption(target.width, target.height)
+    const outputSize = ratioOption.size
+    const configForNode = { ...apiConfig, size: outputSize }
+    const generationPrompt = outpaintGenerationPrompt(trimmed, sourceWidth, sourceHeight, outpaintInsets)
+    const createdAt = new Date().toLocaleString('zh-CN')
+
+    setIsGenerating(true)
+    updateNodeData(nodeId, {
+      status: 'generating',
+      error: undefined,
+      prompt: trimmed,
+      sourceImageUrl,
+      model: apiConfig.model,
+      size: outputSize,
+    })
+
+    try {
+      const prepared = await prepareOutpaintInputs(sourceImageUrl, sourceWidth, sourceHeight, outpaintInsets)
+      const generatedImageUrl = await requestGeneratedImage(
+        generationPrompt,
+        configForNode,
+        [prepared.referenceImageUrl],
+        prepared.maskUrl,
+      )
+      const imageUrl = await compositeOutpaintResult(
+        sourceImageUrl,
+        generatedImageUrl,
+        sourceWidth,
+        sourceHeight,
+        outpaintInsets,
+      )
+      updateNodeData(nodeId, {
+        imageUrl,
+        sourceImageUrl,
+        status: 'done',
+        error: undefined,
+        model: apiConfig.model,
+        size: outputSize,
+      })
+      setHistory((current) => [
+        {
+          id: nodeId,
+          prompt: trimmed,
+          model: apiConfig.model,
+          size: `${target.width}x${target.height}`,
+          createdAt,
+          imageUrl,
+          status: '成功',
+        },
+        ...current,
+      ])
+      setToast(
+        apiConfig.mode === 'mock'
+          ? `已生成 ${target.width} × ${target.height}px 扩图模拟结果，原图区域已保护。`
+          : `扩图完成：${target.width} × ${target.height}px，原图区域已保护。`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '扩图生成失败'
+      updateNodeData(nodeId, { status: 'error', error: message })
+      setHistory((current) => [
+        {
+          id: nodeId,
+          prompt: trimmed,
+          model: apiConfig.model,
+          size: `${target.width}x${target.height}`,
+          createdAt,
+          status: '失败',
+        },
+        ...current,
+      ])
+      setToast(message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
   function generateFromNode(nodeId: string) {
     const node = nodes.find((item) => item.id === nodeId)
     if (node?.data.kind === 'image') {
@@ -2405,6 +3078,10 @@ export default function App() {
     }
     if (node?.data.kind === 'repaint') {
       void generateRepaintInNode(node.id)
+      return
+    }
+    if (node?.data.kind === 'outpaint') {
+      void generateOutpaintInNode(node.id)
       return
     }
     if (node?.data.prompt) {
@@ -2463,6 +3140,41 @@ export default function App() {
   function addImageGenerationFromMenu() {
     if (!contextMenu) return
     addImageGenerationNodeAt(contextMenu.flowPosition)
+    closeContextMenu()
+  }
+
+  function addOutpaintNodeAt(position: XYPosition) {
+    const sourceWidth = 1024
+    const sourceHeight = 1024
+    const outpaintInsets = defaultOutpaintInsets(sourceWidth, sourceHeight)
+    const target = outpaintTargetSize(sourceWidth, sourceHeight, outpaintInsets)
+    const node: WorkflowNode = {
+      id: id('outpaint'),
+      type: 'workflow',
+      position,
+      data: {
+        kind: 'outpaint',
+        title: 'AI 扩图',
+        prompt: defaultOutpaintPrompt,
+        sourceWidth,
+        sourceHeight,
+        outpaintInsets,
+        outpaintPreset: 'free',
+        status: 'idle',
+        model: apiConfig.model,
+        size: nearestAspectRatioOption(target.width, target.height).size,
+        createdAt: new Date().toLocaleString('zh-CN'),
+      },
+    }
+    setNodes((current) => [...current, node])
+    setSelectedNodeId(node.id)
+    markDirty()
+    setToast('已添加 AI 扩图节点，请把图片连接到 Image 输入。')
+  }
+
+  function addOutpaintFromMenu() {
+    if (!contextMenu) return
+    addOutpaintNodeAt(contextMenu.flowPosition)
     closeContextMenu()
   }
 
@@ -2664,15 +3376,26 @@ export default function App() {
 
   function updateApiConfig(patch: Partial<ApiConfig>) {
     setApiConfig((current) => {
-      const preset = patch.mode === 'grsai' ? grsAiApiConfig : {}
-      const mode = patch.apiKey?.trim() && current.mode === 'mock' && !patch.mode ? 'openai' : (patch.mode ?? current.mode)
-      const next = {
-        ...current,
-        ...preset,
-        ...patch,
-        mode,
+      const requestedMode = patch.mode
+      let next: ApiConfig
+
+      if (requestedMode && requestedMode !== current.mode) {
+        window.localStorage.setItem(apiProfileStorageKey(current.mode), JSON.stringify(current))
+        const storedProfile = readStoredApiProfile(requestedMode)
+        next = {
+          ...defaultApiConfig,
+          ...apiModePreset(requestedMode),
+          ...storedProfile,
+          ...patch,
+          mode: requestedMode,
+        }
+      } else {
+        const mode = patch.apiKey?.trim() && current.mode === 'mock' && !requestedMode ? 'openai' : current.mode
+        next = { ...current, ...patch, mode }
       }
+
       window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
+      window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
       return next
     })
   }
@@ -2860,6 +3583,10 @@ export default function App() {
               <button type="button" onClick={addImageGenerationFromMenu}>
                 <ImageIcon size={15} />
                 图像生成
+              </button>
+              <button type="button" onClick={addOutpaintFromMenu}>
+                  <Expand size={15} />
+                AI扩图
               </button>
             </div>
           )}
@@ -3062,29 +3789,62 @@ export default function App() {
                 <span>模式</span>
                 <select value={apiConfig.mode} onChange={(event) => updateApiConfig({ mode: event.target.value as ApiMode })}>
                   <option value="grsai">GA 全部生图模型</option>
+                  <option value="change2pro">Change2Pro 生图模型</option>
                   <option value="mock">本地模拟</option>
                   <option value="openai">OpenAI 兼容</option>
                   <option value="custom">自定义 JSON API</option>
                 </select>
               </label>
-              <label className="field">
+              <div className="field">
                 <span>模型</span>
                 {apiConfig.mode === 'grsai' ? (
-                  <select value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })}>
+                  <select aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })}>
                     {grsAiModelGroups.map((group) => (
                       <optgroup key={group.label} label={group.label}>
                         {group.models.map((model) => (
-                          <option key={model.value} value={model.value} disabled={model.disabled}>
+                          <option key={grsAiModelSelectionValue(model)} value={grsAiModelSelectionValue(model)}>
                             {model.label}
                           </option>
                         ))}
                       </optgroup>
                     ))}
                   </select>
+                ) : apiConfig.mode === 'change2pro' ? (
+                  <>
+                    <div className="change2pro-model-picker">
+                      <select
+                        aria-label="Change2Pro 生图模型"
+                        value={apiConfig.model}
+                        onChange={(event) => updateApiConfig({ model: event.target.value })}
+                        disabled={change2ProModelStatus === 'loading'}
+                      >
+                        {change2ProModels.length > 0 ? (
+                          change2ProModels.map((model) => (
+                            <option key={model.id} value={model.id}>{model.id}</option>
+                          ))
+                        ) : (
+                          <option value={apiConfig.model}>
+                            {apiConfig.model || '填写 Key 后读取模型'}
+                          </option>
+                        )}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => void loadChange2ProModels()}
+                        disabled={!apiConfig.apiKey.trim() || change2ProModelStatus === 'loading'}
+                      >
+                        {change2ProModelStatus === 'loading' && <Loader2 size={13} />}
+                        {change2ProModelStatus === 'loading' ? '读取中' : '读取模型'}
+                      </button>
+                    </div>
+                    <small className={`change2pro-model-message ${change2ProModelStatus}`}>
+                      {change2ProModelMessage || '填写该站 API Key 后自动读取当前分组的生图模型。'}
+                    </small>
+                  </>
                 ) : (
-                  <input value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })} />
+                  <input aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })} />
                 )}
-              </label>
+              </div>
               <label className="field wide">
                 <span>Endpoint</span>
                 <input
@@ -3126,7 +3886,7 @@ export default function App() {
 
             <div className="modal-foot">
               <p>
-                模板支持 {'{prompt}'}、{'{model}'}、{'{size}'}、{'{referenceImageUrl}'}、{'{referenceImageBase64}'} 占位符。
+                模板支持 {'{prompt}'}、{'{model}'}、{'{size}'}、{'{referenceImageUrl}'}、{'{referenceImageBase64}'}、{'{maskImageUrl}'}、{'{maskImageBase64}'} 占位符。
                 请求会通过本地代理发送，避免浏览器 CORS 限制。
               </p>
               <button type="button" onClick={() => setShowSettings(false)}>
