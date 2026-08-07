@@ -20,7 +20,9 @@ export const grsAiModelGroups: GrsAiModelGroup[] = [
     label: 'GPT Image',
     models: [
       { label: 'GPT Image 2 · 1K', value: 'gpt-image-2', family: 'gpt-image', imageSize: '1K' },
-      { label: 'GPT Image 2 VIP · 1K', value: 'gpt-image-2-vip', family: 'gpt-image', imageSize: '1K' },
+      { label: 'GPT Image 2 稳定组 · 1K', value: 'gpt-image-2-vip', family: 'gpt-image', imageSize: '1K' },
+      { label: 'GPT Image 2 稳定组 · 2K', value: 'gpt-image-2-vip', family: 'gpt-image', imageSize: '2K' },
+      { label: 'GPT Image 2 稳定组 · 4K', value: 'gpt-image-2-vip', family: 'gpt-image', imageSize: '4K' },
     ],
   },
   {

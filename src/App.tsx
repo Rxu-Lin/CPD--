@@ -36,6 +36,7 @@ import {
   CheckCircle2,
   Copy,
   Download,
+  Eye,
   Expand,
   FolderOpen,
   Group as GroupIcon,
@@ -50,6 +51,7 @@ import {
   Upload,
   UploadCloud,
   Wand2,
+  Workflow as WorkflowIcon,
   X,
 } from 'lucide-react'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
@@ -144,12 +146,14 @@ function repaintPromptWithColor(prompt: string, brushColor: RepaintBrushColor) {
 }
 type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'custom'
 type AspectRatioValue = '16:9' | '3:2' | '4:3' | '1:1' | '3:4' | '2:3' | '9:16'
+type ImageResolutionTier = '1K' | '2K' | '4K'
 
 type ApiConfig = {
   mode: ApiMode
   endpoint: string
   apiKey: string
   model: string
+  imageSize: ImageResolutionTier
   size: string
   bodyTemplate: string
   responsePath: string
@@ -168,6 +172,10 @@ type GenerationRecord = {
   createdAt: string
   imageUrl?: string
   status: '成功' | '失败'
+}
+
+type HistoryImagePreview = Pick<GenerationRecord, 'prompt' | 'createdAt'> & {
+  imageUrl: string
 }
 
 type ImageInputSlot = {
@@ -304,6 +312,7 @@ const defaultApiConfig: ApiConfig = {
   endpoint: 'https://api.openai.com/v1/images/generations',
   apiKey: '',
   model: 'gpt-image-1',
+  imageSize: '1K',
   size: '1024x1024',
   bodyTemplate: '{\n  "model": "{model}",\n  "prompt": "{prompt}",\n  "size": "{size}",\n  "n": 1\n}',
   responsePath: 'data.0.url',
@@ -320,6 +329,7 @@ const change2ProApiConfig: Partial<ApiConfig> = {
   mode: 'change2pro',
   endpoint: 'https://api.change2pro.com/v1/images/generations',
   model: 'gpt-image-2',
+  imageSize: '1K',
   responsePath: 'data.0.url',
 }
 
@@ -360,6 +370,19 @@ const aspectRatioOptions: Array<{
 ]
 
 const defaultAspectRatioOption = aspectRatioOptions.find((option) => option.value === '1:1') ?? aspectRatioOptions[0]
+const change2ProImageSizes: ImageResolutionTier[] = ['1K', '2K', '4K']
+
+function change2ProSupportsImageSize(model: string) {
+  const value = model.trim().toLowerCase().replaceAll('_', '-').replaceAll('.', '-')
+  return /^(gpt-?image-?2(?:-vip)?|nano-?banana-?2|nano-?banana-?pro|gemini-3-1-flash-image-preview|gemini-3-pro-image-preview)$/.test(value)
+}
+
+function change2ProModelLabel(model: string) {
+  const value = model.trim().toLowerCase()
+  if (value === 'gemini-3.1-flash-image-preview') return 'Nano Banana 2 · gemini-3.1-flash-image-preview'
+  if (value === 'gemini-3-pro-image-preview') return 'Nano Banana Pro · gemini-3-pro-image-preview'
+  return model
+}
 
 const OUTPAINT_MAX_DIMENSION = 4096
 const outpaintPresetOptions: OutpaintPreset[] = ['free', '1:1', '4:3', '3:4', '16:9', '9:16', '2:3']
@@ -1685,11 +1708,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 <button
                   className="node-replace-button nodrag nopan"
                   type="button"
-                  title="替换参考图"
+                  title={data.imageUrl ? '替换参考图' : '上传参考图'}
                   onClick={() => replaceImageInputRef.current?.click()}
                 >
-                  <RefreshCw size={13} />
-                  <span>替换</span>
+                  {data.imageUrl ? <RefreshCw size={13} /> : <UploadCloud size={13} />}
+                  <span>{data.imageUrl ? '替换' : '上传'}</span>
                 </button>
               </>
             )}
@@ -1819,6 +1842,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [showModelStudio, setShowModelStudio] = useState(false)
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
+  const [historyImagePreview, setHistoryImagePreview] = useState<HistoryImagePreview | null>(null)
+  const [historyImageNaturalSize, setHistoryImageNaturalSize] = useState<{ width: number; height: number } | null>(null)
+  const [showQuickWorkflows, setShowQuickWorkflows] = useState(false)
   const [showPromptLibrary, setShowPromptLibrary] = useState(false)
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null)
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<WorkflowNode, Edge> | null>(null)
@@ -2146,7 +2172,7 @@ export default function App() {
 
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || showModelStudio || groupDialog || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || showModelStudio || groupDialog || historyImagePreview || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -2155,13 +2181,24 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, groupDialog, nodes, selectedNodeId, showModelStudio, showSettings],
+    [deleteNodesByIds, groupDialog, historyImagePreview, nodes, selectedNodeId, showModelStudio, showSettings],
   )
 
   useEffect(() => {
     window.addEventListener('keydown', handleDeleteKey, true)
     return () => window.removeEventListener('keydown', handleDeleteKey, true)
   }, [handleDeleteKey])
+
+  useEffect(() => {
+    if (!historyImagePreview) return
+
+    const handlePreviewEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setHistoryImagePreview(null)
+    }
+
+    window.addEventListener('keydown', handlePreviewEscape, true)
+    return () => window.removeEventListener('keydown', handlePreviewEscape, true)
+  }, [historyImagePreview])
 
   const downloadNodeImage = useCallback(
     (nodeId: string) => {
@@ -3143,6 +3180,102 @@ export default function App() {
     closeContextMenu()
   }
 
+  function addImageToImageQuickWorkflow() {
+    const canvasCenter = flowInstance?.screenToFlowPosition(
+      { x: window.innerWidth / 2, y: window.innerHeight / 2 },
+      { snapToGrid: true, snapGrid: [24, 24] },
+    ) ?? { x: 720, y: 460 }
+    const createdAt = new Date().toLocaleString('zh-CN')
+    const referenceNodeId = id('ref')
+    const promptNodeId = id('prompt')
+    const imageNodeId = id('image')
+    const referenceNode: WorkflowNode = {
+      id: referenceNodeId,
+      type: 'workflow',
+      position: { x: canvasCenter.x - 560, y: canvasCenter.y - 340 },
+      data: {
+        kind: 'reference',
+        title: '参考图像',
+        status: 'idle',
+        model: '上传',
+        size: apiConfig.size || defaultApiConfig.size,
+        createdAt,
+      },
+    }
+    const promptNode: WorkflowNode = {
+      id: promptNodeId,
+      type: 'workflow',
+      position: { x: canvasCenter.x - 560, y: canvasCenter.y + 100 },
+      data: {
+        kind: 'prompt',
+        title: '提示词输入框',
+        prompt: '',
+        status: 'idle',
+        model: apiConfig.model,
+        size: apiConfig.size || defaultApiConfig.size,
+        createdAt,
+      },
+    }
+    const imageNode: WorkflowNode = {
+      id: imageNodeId,
+      type: 'workflow',
+      position: { x: canvasCenter.x - 40, y: canvasCenter.y - 250 },
+      selected: true,
+      data: {
+        kind: 'image',
+        title: 'AI 生成图像',
+        prompt: '',
+        status: 'idle',
+        model: apiConfig.model,
+        size: apiConfig.size || defaultApiConfig.size,
+        createdAt,
+      },
+    }
+    const workflowEdges: Edge[] = [
+      {
+        id: id('edge'),
+        source: referenceNodeId,
+        sourceHandle: 'output',
+        target: imageNodeId,
+        targetHandle: `${imageInputHandlePrefix}1`,
+        animated: true,
+        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+        style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
+      },
+      {
+        id: id('edge'),
+        source: promptNodeId,
+        sourceHandle: 'output',
+        target: imageNodeId,
+        targetHandle: 'prompt',
+        animated: true,
+        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+        style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
+      },
+    ]
+
+    setNodes((current) => [
+      ...current.map((node) => ({ ...node, selected: false })),
+      referenceNode,
+      promptNode,
+      imageNode,
+    ])
+    setEdges((current) => [...current, ...workflowEdges])
+    setSelectedNodeId(imageNodeId)
+    setShowQuickWorkflows(false)
+    setShowPromptLibrary(false)
+    markDirty()
+    setToast('已创建图生图快捷工作流，请上传参考图并填写提示词。')
+    window.setTimeout(() => {
+      void flowInstance?.fitView({
+        nodes: [{ id: referenceNodeId }, { id: promptNodeId }, { id: imageNodeId }],
+        padding: 0.18,
+        maxZoom: 0.92,
+        duration: 240,
+      })
+    }, 0)
+  }
+
   function addOutpaintNodeAt(position: XYPosition) {
     const sourceWidth = 1024
     const sourceHeight = 1024
@@ -3590,6 +3723,62 @@ export default function App() {
               </button>
             </div>
           )}
+          <div className="quick-workflow-popover">
+            <SpecularButton
+              className={`prompt-library-toggle ${showQuickWorkflows ? 'active' : ''}`}
+              size="md"
+              radius={8}
+              tint="#ffffff"
+              tintOpacity={0}
+              blur={0}
+              textColor="#f5f5f5"
+              lineColor="#ffffff"
+              baseColor="#525252"
+              intensity={0.8}
+              shineSize={11}
+              shineFade={31}
+              thickness={1.3}
+              speed={0.3}
+              proximity={50}
+              followMouse
+              autoAnimate={false}
+              onClick={() => {
+                setShowQuickWorkflows((current) => !current)
+                setShowPromptLibrary(false)
+              }}
+              title="快捷工作流"
+              aria-expanded={showQuickWorkflows}
+              aria-controls="quick-workflow-panel"
+            >
+              <WorkflowIcon size={15} />
+              快捷工作流
+            </SpecularButton>
+            {showQuickWorkflows && (
+              <section id="quick-workflow-panel" className="quick-workflow-panel" aria-label="快捷工作流">
+                <div className="prompt-library-head">
+                  <div>
+                    <strong>快捷工作流</strong>
+                    <small>一键布置并连接常用节点</small>
+                  </div>
+                  <button type="button" onClick={() => setShowQuickWorkflows(false)} title="关闭快捷工作流">
+                    <X size={15} />
+                  </button>
+                </div>
+                <div className="quick-workflow-list">
+                  <button className="quick-workflow-card" type="button" onClick={addImageToImageQuickWorkflow}>
+                    <span className="quick-workflow-icon" aria-hidden="true">
+                      <WorkflowIcon size={18} />
+                    </span>
+                    <span className="quick-workflow-copy">
+                      <strong>图生图</strong>
+                      <small>空白参考图 + 空白提示词 + 图像生成</small>
+                    </span>
+                    <span className="quick-workflow-action">创建</span>
+                  </button>
+                </div>
+              </section>
+            )}
+          </div>
           <div className="prompt-library-popover">
             <SpecularButton
               className={`prompt-library-toggle ${showPromptLibrary ? 'active' : ''}`}
@@ -3609,7 +3798,10 @@ export default function App() {
               proximity={50}
               followMouse
               autoAnimate={false}
-              onClick={() => setShowPromptLibrary((current) => !current)}
+              onClick={() => {
+                setShowPromptLibrary((current) => !current)
+                setShowQuickWorkflows(false)
+              }}
               title="常用提示词"
               aria-expanded={showPromptLibrary}
               aria-controls="prompt-library-panel"
@@ -3675,9 +3867,25 @@ export default function App() {
                       const imageUrl = item.imageUrl || nodes.find((node) => node.id === item.id)?.data.imageUrl
                       return (
                         <div className="history-card" key={`${item.id}-${item.createdAt}-${index}`}>
-                          <button className="history-thumb" type="button" onClick={() => setPrompt(item.prompt)} title="使用这条提示词">
-                            {imageUrl ? <img src={imageUrl} alt="生成历史缩略图" /> : <ImageIcon size={22} />}
-                          </button>
+                          <div className="history-thumb-wrap">
+                            <button className="history-thumb" type="button" onClick={() => setPrompt(item.prompt)} title="使用这条提示词">
+                              {imageUrl ? <img src={imageUrl} alt="生成历史缩略图" /> : <ImageIcon size={22} />}
+                            </button>
+                            {imageUrl && (
+                              <button
+                                className="history-preview-button"
+                                type="button"
+                                onClick={() => {
+                                  setHistoryImageNaturalSize(null)
+                                  setHistoryImagePreview({ imageUrl, prompt: item.prompt, createdAt: item.createdAt })
+                                }}
+                                title="查看大图"
+                                aria-label="查看生成历史大图"
+                              >
+                                <Eye size={17} />
+                              </button>
+                            )}
+                          </div>
                           <div className="history-meta">
                             <span>{item.status}</span>
                             <strong>{item.prompt}</strong>
@@ -3702,6 +3910,57 @@ export default function App() {
               </div>
             )}
           </div>
+          {historyImagePreview && (
+            <div
+              className="history-image-backdrop"
+              role="presentation"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) setHistoryImagePreview(null)
+              }}
+              onContextMenu={(event) => event.stopPropagation()}
+            >
+              <section
+                className={`history-image-modal ${
+                  historyImageNaturalSize
+                    ? historyImageNaturalSize.width > historyImageNaturalSize.height
+                      ? 'is-landscape'
+                      : historyImageNaturalSize.width < historyImageNaturalSize.height
+                        ? 'is-portrait'
+                        : 'is-square'
+                    : ''
+                }`}
+                role="dialog"
+                aria-modal="true"
+                aria-label="生成历史大图预览"
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                <div className="history-image-head">
+                  <div>
+                    <strong>生成历史</strong>
+                    <small>{historyImagePreview.createdAt}</small>
+                  </div>
+                  <button type="button" onClick={() => setHistoryImagePreview(null)} title="关闭" aria-label="关闭大图预览">
+                    <X size={18} />
+                  </button>
+                </div>
+                <div className="history-image-stage">
+                  <img
+                    src={historyImagePreview.imageUrl}
+                    alt="生成历史大图"
+                    onLoad={(event) => {
+                      const { naturalWidth, naturalHeight } = event.currentTarget
+                      if (naturalWidth > 0 && naturalHeight > 0) {
+                        setHistoryImageNaturalSize({ width: naturalWidth, height: naturalHeight })
+                      }
+                    }}
+                  />
+                </div>
+                <div className="history-image-caption" title={historyImagePreview.prompt}>
+                  {historyImagePreview.prompt}
+                </div>
+              </section>
+            </div>
+          )}
         </div>
       </section>
 
@@ -3820,11 +4079,11 @@ export default function App() {
                       >
                         {change2ProModels.length > 0 ? (
                           change2ProModels.map((model) => (
-                            <option key={model.id} value={model.id}>{model.id}</option>
+                            <option key={model.id} value={model.id}>{change2ProModelLabel(model.id)}</option>
                           ))
                         ) : (
                           <option value={apiConfig.model}>
-                            {apiConfig.model || '填写 Key 后读取模型'}
+                            {apiConfig.model ? change2ProModelLabel(apiConfig.model) : '填写 Key 后读取模型'}
                           </option>
                         )}
                       </select>
@@ -3840,6 +4099,27 @@ export default function App() {
                     <small className={`change2pro-model-message ${change2ProModelStatus}`}>
                       {change2ProModelMessage || '填写该站 API Key 后自动读取当前分组的生图模型。'}
                     </small>
+                    {change2ProSupportsImageSize(apiConfig.model) && (
+                      <div className="change2pro-resolution-section">
+                        <div className="change2pro-resolution-head">
+                          <span>输出清晰度</span>
+                          <small>与画布比例组合为实际像素</small>
+                        </div>
+                        <div className="change2pro-resolution-picker" role="group" aria-label="Change2Pro 输出清晰度">
+                          {change2ProImageSizes.map((imageSize) => (
+                            <button
+                              className={apiConfig.imageSize === imageSize ? 'active' : ''}
+                              type="button"
+                              aria-pressed={apiConfig.imageSize === imageSize}
+                              onClick={() => updateApiConfig({ imageSize })}
+                              key={imageSize}
+                            >
+                              {imageSize}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <input aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })} />

@@ -27,12 +27,14 @@ const runtimeImagesDir = path.join(projectCacheDir, runtimeImageSessionId, 'imag
 const generationRateLimits = new Map<string, { count: number; startedAt: number }>()
 
 type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'custom'
+type ImageResolutionTier = '1K' | '2K' | '4K'
 
 type ApiConfig = {
   mode: ApiMode
   endpoint: string
   apiKey: string
   model: string
+  imageSize?: ImageResolutionTier
   size: string
   bodyTemplate: string
   responsePath: string
@@ -634,9 +636,8 @@ function aspectRatioFromSize(size: string) {
   return map[size] || size || '1:1'
 }
 
-function gptImageSizeFromSize(size: string) {
-  const ratio = aspectRatioFromSize(size)
-  const map: Record<string, string> = {
+const gptImageSizesByTier: Record<ImageResolutionTier, Record<string, string>> = {
+  '1K': {
     '16:9': '1672x941',
     '3:2': '1536x1024',
     '4:3': '1448x1086',
@@ -644,20 +645,35 @@ function gptImageSizeFromSize(size: string) {
     '3:4': '1086x1448',
     '2:3': '1024x1536',
     '9:16': '941x1672',
-  }
-
-  return map[ratio] || size || '1024x1024'
+  },
+  '2K': {
+    '16:9': '2048x1152',
+    '3:2': '2048x1360',
+    '4:3': '2048x1536',
+    '1:1': '2048x2048',
+    '3:4': '1536x2048',
+    '2:3': '1360x2048',
+    '9:16': '1152x2048',
+  },
+  '4K': {
+    '16:9': '3840x2160',
+    '3:2': '3520x2336',
+    '4:3': '3312x2480',
+    '1:1': '2880x2880',
+    '3:4': '2480x3312',
+    '2:3': '2336x3520',
+    '9:16': '2160x3840',
+  },
 }
 
-const supportedGptImageSizes = new Set([
-  '1024x1024',
-  '1672x941',
-  '1536x1024',
-  '1448x1086',
-  '1086x1448',
-  '1024x1536',
-  '941x1672',
-])
+function gptImageSizeFromSize(size: string, imageSize: ImageResolutionTier = '1K') {
+  const ratio = aspectRatioFromSize(size)
+  return gptImageSizesByTier[imageSize][ratio] || size || gptImageSizesByTier[imageSize]['1:1']
+}
+
+const supportedGptImageSizes = new Set(
+  Object.values(gptImageSizesByTier).flatMap((sizes) => Object.values(sizes)),
+)
 
 const supportedNanoBananaRatios = new Set(['16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16'])
 
@@ -974,7 +990,9 @@ async function requestGrsAiImage(config: ApiConfig, prompt: string, referenceIma
   const family = modelConfig?.family ?? 'gpt-image'
   const endpoint = normalizeGrsAiEndpoint(config.endpoint)
   const headers: Record<string, string> = config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}
-  const outputSize = family === 'gpt-image' ? gptImageSizeFromSize(config.size) : aspectRatioFromSize(config.size)
+  const outputSize = family === 'gpt-image'
+    ? gptImageSizeFromSize(config.size, modelConfig?.imageSize)
+    : aspectRatioFromSize(config.size)
   validateGrsAiOutputSize(family, outputSize)
   const maxReferenceImages = family === 'gpt-image' ? 16 : 14
   const preparedImages = await prepareGrsAiReferenceImages(referenceImageUrls, maxReferenceImages)
@@ -1078,6 +1096,117 @@ function isImageGenerationModel(modelId: string) {
   ].some((pattern) => pattern.test(id))
 }
 
+function change2ProSupportsImageSize(model: string) {
+  const value = model.trim().toLowerCase().replaceAll('_', '-').replaceAll('.', '-')
+  return /^(gpt-?image-?2(?:-vip)?|nano-?banana-?2|nano-?banana-?pro|gemini-3-1-flash-image-preview|gemini-3-pro-image-preview)$/.test(value)
+}
+
+function isChange2ProGeminiImageModel(model: string) {
+  const value = model.trim().toLowerCase()
+  return value === 'gemini-3.1-flash-image-preview' || value === 'gemini-3-pro-image-preview'
+}
+
+function change2ProOutputSize(config: ApiConfig) {
+  if (!change2ProSupportsImageSize(config.model)) return config.size
+  return gptImageSizeFromSize(config.size, config.imageSize ?? '1K')
+}
+
+function change2ProGeminiEndpoint(endpoint: string, model: string) {
+  const url = new URL(endpoint)
+  const basePath = url.pathname
+    .replace(/\/v1beta(?:\/.*)?$/, '')
+    .replace(/\/v1(?:\/.*)?$/, '')
+    .replace(/\/$/, '')
+
+  url.pathname = `${basePath}/v1beta/models/${encodeURIComponent(model)}:generateContent`
+  url.search = ''
+  return url.toString()
+}
+
+function change2ProGeminiImageFromResponse(source: unknown) {
+  if (!source || typeof source !== 'object') throw new Error('Gemini 接口没有返回可识别的内容。')
+  const root = source as Record<string, unknown>
+  const candidates = Array.isArray(root.candidates) ? root.candidates : []
+
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const content = (candidate as Record<string, unknown>).content
+    if (!content || typeof content !== 'object') continue
+    const parts = Array.isArray((content as Record<string, unknown>).parts)
+      ? ((content as Record<string, unknown>).parts as unknown[])
+      : []
+
+    for (const part of parts) {
+      if (!part || typeof part !== 'object') continue
+      const item = part as Record<string, unknown>
+      const inlineData = (item.inlineData ?? item.inline_data) as Record<string, unknown> | undefined
+      const data = typeof inlineData?.data === 'string' ? inlineData.data : ''
+      if (data) {
+        const mimeType = typeof inlineData?.mimeType === 'string'
+          ? inlineData.mimeType
+          : typeof inlineData?.mime_type === 'string'
+            ? inlineData.mime_type
+            : 'image/png'
+        return { data: [{ b64_json: data.startsWith('data:image/') ? data : `data:${mimeType};base64,${data}` }] }
+      }
+
+      const fileData = (item.fileData ?? item.file_data) as Record<string, unknown> | undefined
+      const fileUri = typeof fileData?.fileUri === 'string'
+        ? fileData.fileUri
+        : typeof fileData?.file_uri === 'string'
+          ? fileData.file_uri
+          : ''
+      if (fileUri) return { data: [{ url: fileUri }] }
+    }
+  }
+
+  const promptFeedback = root.promptFeedback && typeof root.promptFeedback === 'object'
+    ? knownErrorText(root.promptFeedback)
+    : undefined
+  throw new Error(promptFeedback || 'Gemini 接口已响应，但没有返回图片；请检查内容审核结果或模型权限。')
+}
+
+async function requestChange2ProGeminiImage(
+  config: ApiConfig,
+  prompt: string,
+  referenceImageUrls: string[],
+  maskUrl?: string,
+) {
+  const imageUrls = maskUrl ? [...referenceImageUrls, maskUrl] : referenceImageUrls
+  if (imageUrls.length > 14) throw new UpstreamHttpError('当前模型最多支持 14 张输入图片。', 400)
+
+  const imageParts = await Promise.all(
+    imageUrls.map(async (imageUrl, index) => {
+      const image = await loadImageBuffer(imageUrl)
+      validateReferenceImage(image, index)
+      return {
+        inlineData: {
+          mimeType: image.mediaType,
+          data: image.buffer.toString('base64'),
+        },
+      }
+    }),
+  )
+  const endpoint = change2ProGeminiEndpoint(config.endpoint, config.model)
+  const payload = {
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: prompt }, ...imageParts],
+      },
+    ],
+    generationConfig: {
+      responseModalities: ['TEXT', 'IMAGE'],
+      imageConfig: {
+        aspectRatio: aspectRatioFromSize(config.size),
+        imageSize: config.imageSize ?? '1K',
+      },
+    },
+  }
+  const result = await postJson(endpoint, { 'x-goog-api-key': config.apiKey.trim() }, payload)
+  return change2ProGeminiImageFromResponse(result)
+}
+
 function change2ProModelsFromResponse(source: unknown) {
   if (!source || typeof source !== 'object') return []
   const root = source as Record<string, unknown>
@@ -1144,10 +1273,14 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
   if (!prompt) throw new Error('缺少提示词')
   if (config.mode === 'mock') throw new Error('当前仍是本地模拟模式，请切换到 OpenAI 或自定义 API')
   if (!config.endpoint?.trim()) throw new Error('请先填写 API Endpoint')
+  if (config.mode === 'change2pro' && isChange2ProGeminiImageModel(config.model)) {
+    return requestChange2ProGeminiImage(config, prompt, referenceImageUrls, body.maskUrl)
+  }
 
   const isOpenAiCompatible = config.mode === 'openai' || config.mode === 'change2pro'
   const endpoint = isOpenAiCompatible && firstReferenceImageUrl ? openAiEditEndpoint(config.endpoint.trim()) : config.endpoint.trim()
   const headers: Record<string, string> = config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}
+  const outputSize = config.mode === 'change2pro' ? change2ProOutputSize(config) : config.size
   let requestBody: string | FormData
 
   if (isOpenAiCompatible && firstReferenceImageUrl) {
@@ -1156,7 +1289,7 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
     const form = new FormData()
     form.append('model', config.model)
     form.append('prompt', prompt)
-    form.append('size', config.size)
+    form.append('size', outputSize)
     form.append('n', '1')
     form.append('image', new Blob([image.buffer], { type: image.mediaType }), `reference${image.extension}`)
     if (body.maskUrl) {
@@ -1169,7 +1302,7 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
     headers['Content-Type'] = 'application/json'
     const upstreamBody =
       isOpenAiCompatible
-        ? { model: config.model, prompt, size: config.size, n: 1 }
+        ? { model: config.model, prompt, size: outputSize, n: 1 }
         : buildCustomBody(config, prompt, firstReferenceImageUrl, body.maskUrl)
     requestBody = JSON.stringify(upstreamBody)
   }
