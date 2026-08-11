@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin, type ViteDevServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { ZipArchive, type ArchiverError } from 'archiver'
+import { Open as ZipOpen } from 'unzipper'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
@@ -26,7 +27,7 @@ const runtimeImageSessionId = '00000000-0000-4000-8000-000000000000'
 const runtimeImagesDir = path.join(projectCacheDir, runtimeImageSessionId, 'images')
 const generationRateLimits = new Map<string, { count: number; startedAt: number }>()
 
-type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'custom'
+type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'volcengine' | 'custom'
 type ImageResolutionTier = '1K' | '2K' | '4K'
 
 type ApiConfig = {
@@ -394,28 +395,6 @@ exit 2
   })
 }
 
-function runPowerShellArchive(script: string, sourcePath: string, destinationPath: string) {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-      windowsHide: true,
-      env: {
-        ...process.env,
-        AI_CANVAS_SOURCE_PATH: sourcePath,
-        AI_CANVAS_DESTINATION_PATH: destinationPath,
-      },
-    })
-    let stderr = ''
-    child.stderr.on('data', (chunk) => {
-      stderr += String(chunk)
-    })
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(stderr.trim() || '项目包压缩处理失败'))
-    })
-  })
-}
-
 async function compressProjectDirectory(sourceDir: string, destinationZip: string) {
   await unlink(destinationZip).catch(() => undefined)
   await new Promise<void>((resolve, reject) => {
@@ -448,11 +427,23 @@ async function compressProjectDirectory(sourceDir: string, destinationZip: strin
 
 async function extractProjectArchive(sourceZip: string, destinationDir: string) {
   await mkdir(destinationDir, { recursive: true })
-  await runPowerShellArchive(
-    `Expand-Archive -LiteralPath $env:AI_CANVAS_SOURCE_PATH -DestinationPath $env:AI_CANVAS_DESTINATION_PATH -Force`,
-    sourceZip,
-    destinationDir,
-  )
+  const archive = await ZipOpen.file(sourceZip)
+  const maxEntries = 5000
+  const maxExtractedBytes = 500 * 1024 * 1024
+  if (archive.files.length > maxEntries) throw new Error(`项目包文件数量不能超过 ${maxEntries} 个`)
+
+  let extractedBytes = 0
+  for (const entry of archive.files) {
+    const normalizedPath = entry.path.replaceAll('\\', '/')
+    const pathParts = normalizedPath.split('/').filter(Boolean)
+    if (normalizedPath.startsWith('/') || pathParts.includes('..')) {
+      throw new Error('项目包包含不安全的文件路径')
+    }
+    extractedBytes += entry.uncompressedSize || 0
+    if (extractedBytes > maxExtractedBytes) throw new Error('项目包解压后不能超过 500 MB')
+  }
+
+  await archive.extract({ path: destinationDir, concurrency: 5 })
 }
 
 async function saveJsonWithDialog(filename: string, content: string) {
@@ -1048,6 +1039,61 @@ async function requestGrsAiImage(config: ApiConfig, prompt: string, referenceIma
   throw new Error('GrsAI generation timed out. Please try again later.')
 }
 
+const volcengineSeedreamMaxReferenceImages = 10
+
+async function prepareVolcengineReferenceImages(imageUrls: string[]) {
+  if (imageUrls.length > volcengineSeedreamMaxReferenceImages) {
+    throw new UpstreamHttpError(`Seedream 5.0 最多支持 ${volcengineSeedreamMaxReferenceImages} 张参考图，当前已连接 ${imageUrls.length} 张。`, 400)
+  }
+
+  const preparedImages: string[] = []
+  let totalBytes = 0
+  for (const [index, imageUrl] of imageUrls.entries()) {
+    const image = await loadImageBuffer(imageUrl)
+    validateReferenceImage(image, index)
+    totalBytes += image.buffer.length
+    if (totalBytes > maxTotalReferenceImageBytes) {
+      throw new UpstreamHttpError('参考图总大小超过 48 MB，请减少图片或先压缩。', 400)
+    }
+    preparedImages.push(dataUrlFromImage(image))
+  }
+  return preparedImages
+}
+
+async function requestVolcengineSeedreamImage(
+  config: ApiConfig,
+  prompt: string,
+  referenceImageUrls: string[],
+  maskUrl?: string,
+) {
+  if (!config.apiKey?.trim()) throw new UpstreamHttpError('请先填写火山方舟 API Key。', 400)
+  const model = config.model?.trim()
+  if (!model) throw new UpstreamHttpError('请填写 Seedream 模型 ID 或方舟推理接入点 ID。', 400)
+
+  const endpoint = config.endpoint.trim()
+  const imageUrls = [...referenceImageUrls]
+  if (maskUrl && !imageUrls.includes(maskUrl)) imageUrls.push(maskUrl)
+  const images = await prepareVolcengineReferenceImages(imageUrls)
+  const payload: Record<string, unknown> = {
+    model,
+    prompt,
+    size: config.size?.trim() || '2K',
+    sequential_image_generation: 'disabled',
+    response_format: 'url',
+    watermark: false,
+  }
+  if (images.length) payload.image = images
+
+  try {
+    return await postJson(endpoint, { Authorization: `Bearer ${config.apiKey.trim()}` }, payload)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '火山方舟图片生成请求失败'
+    const detailedMessage = `${message}（模型 ${model}，输出 ${String(payload.size)}，参考图 ${images.length} 张）`
+    if (error instanceof UpstreamHttpError) throw new UpstreamHttpError(detailedMessage, error.statusCode)
+    throw new Error(detailedMessage)
+  }
+}
+
 function imagePayloadFromDataUrl(imageUrl?: string) {
   if (!imageUrl?.startsWith('data:image/')) return ''
   return imageUrl.slice(imageUrl.indexOf(',') + 1)
@@ -1273,6 +1319,9 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
   if (!prompt) throw new Error('缺少提示词')
   if (config.mode === 'mock') throw new Error('当前仍是本地模拟模式，请切换到 OpenAI 或自定义 API')
   if (!config.endpoint?.trim()) throw new Error('请先填写 API Endpoint')
+  if (config.mode === 'volcengine') {
+    return requestVolcengineSeedreamImage(config, prompt, referenceImageUrls, body.maskUrl)
+  }
   if (config.mode === 'change2pro' && isChange2ProGeminiImageModel(config.model)) {
     return requestChange2ProGeminiImage(config, prompt, referenceImageUrls, body.maskUrl)
   }

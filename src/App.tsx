@@ -144,7 +144,7 @@ function repaintPromptBody(prompt: string) {
 function repaintPromptWithColor(prompt: string, brushColor: RepaintBrushColor) {
   return `${repaintBrushOptions[brushColor].prefix}${repaintPromptBody(prompt)}`
 }
-type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'custom'
+type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'volcengine' | 'custom'
 type AspectRatioValue = '16:9' | '3:2' | '4:3' | '1:1' | '3:4' | '2:3' | '9:16'
 type ImageResolutionTier = '1K' | '2K' | '4K'
 
@@ -333,6 +333,20 @@ const change2ProApiConfig: Partial<ApiConfig> = {
   responsePath: 'data.0.url',
 }
 
+const volcengineApiConfig: Partial<ApiConfig> = {
+  mode: 'volcengine',
+  endpoint: 'https://ark.cn-beijing.volces.com/api/v3/images/generations',
+  model: 'doubao-seedream-5-0-260128',
+  imageSize: '2K',
+  bodyTemplate: '{\n  "model": "{model}",\n  "prompt": "{prompt}",\n  "size": "{size}",\n  "sequential_image_generation": "disabled",\n  "response_format": "url",\n  "watermark": false\n}',
+  responsePath: 'data.0.url',
+}
+
+function apiModelDisplayName(model: string) {
+  if (model === 'doubao-seedream-5-0-260128') return 'Doubao Seedream 5.0 Pro'
+  return findGrsAiModel(model)?.label || model
+}
+
 function apiProfileStorageKey(mode: ApiMode) {
   return `${API_PROFILE_STORAGE_KEY_PREFIX}${mode}`
 }
@@ -349,6 +363,7 @@ function readStoredApiProfile(mode: ApiMode) {
 function apiModePreset(mode: ApiMode): Partial<ApiConfig> {
   if (mode === 'grsai') return grsAiApiConfig
   if (mode === 'change2pro') return change2ProApiConfig
+  if (mode === 'volcengine') return volcengineApiConfig
   if (mode === 'openai') return { mode, endpoint: defaultApiConfig.endpoint, model: defaultApiConfig.model }
   if (mode === 'custom') return { mode, endpoint: '', model: '', responsePath: 'data.0.url' }
   return { ...defaultApiConfig, mode: 'mock' }
@@ -1373,7 +1388,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const nodeTitle = isReference
     ? (data.sourceName || data.title)
     : isImage
-      ? (findGrsAiModel(configuredModelName)?.label || configuredModelName || data.title)
+      ? (apiModelDisplayName(configuredModelName) || data.title)
       : data.title
   const imageInputSlots = isImage
     ? data.imageInputSlots?.length
@@ -4036,7 +4051,7 @@ export default function App() {
             <div className="modal-head">
               <div>
                 <h2>API 设置</h2>
-                <p>支持 OpenAI 兼容图像接口，也可以接自己的 JSON API。</p>
+                <p>支持火山方舟、OpenAI 兼容图像接口，也可以接自己的 JSON API。</p>
               </div>
               <button type="button" onClick={() => setShowSettings(false)} title="关闭">
                 <X size={18} />
@@ -4049,6 +4064,7 @@ export default function App() {
                 <select value={apiConfig.mode} onChange={(event) => updateApiConfig({ mode: event.target.value as ApiMode })}>
                   <option value="grsai">GA 全部生图模型</option>
                   <option value="change2pro">Change2Pro 生图模型</option>
+                  <option value="volcengine">火山方舟 · Seedream 5.0 Pro</option>
                   <option value="mock">本地模拟</option>
                   <option value="openai">OpenAI 兼容</option>
                   <option value="custom">自定义 JSON API</option>
@@ -4120,6 +4136,18 @@ export default function App() {
                         </div>
                       </div>
                     )}
+                  </>
+                ) : apiConfig.mode === 'volcengine' ? (
+                  <>
+                    <input
+                      aria-label="火山方舟模型或推理接入点"
+                      value={apiConfig.model}
+                      onChange={(event) => updateApiConfig({ model: event.target.value })}
+                      placeholder="doubao-seedream-5-0-260128 或 ep-..."
+                    />
+                    <small className="api-field-help">
+                      已预设 Doubao Seedream 5.0 Pro 的正式模型 ID；也可填写方舟控制台创建的推理接入点 ID（ep-...）。
+                    </small>
                   </>
                 ) : (
                   <input aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })} />
