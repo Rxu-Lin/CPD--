@@ -12,8 +12,8 @@
 
 .model3d-studio {
   display: grid;
-  width: min(1280px, calc(100vw - 32px));
-  height: min(820px, calc(100dvh - 32px));
+  width: min(1440px, calc(100vw - 32px));
+  height: min(920px, calc(100dvh - 32px));
   min-height: 620px;
   grid-template-rows: 64px minmax(0, 1fr) 62px;
   overflow: hidden;
@@ -31,6 +31,7 @@
 .model3d-filebar,
 .model3d-title,
 .model3d-title > div,
+.model3d-head-actions,
 .model3d-foot > div,
 .model3d-file-button,
 .model3d-icon-button,
@@ -106,18 +107,78 @@
   color: #f6f9fb;
 }
 
+.model3d-head-actions {
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.model3d-reset-button {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid rgba(172, 184, 198, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #aebbc6;
+  cursor: pointer;
+  padding: 0 10px;
+  font-size: 10px;
+  font-weight: 660;
+}
+
+.model3d-reset-button:hover {
+  border-color: rgba(241, 139, 147, 0.34);
+  background: rgba(241, 139, 147, 0.08);
+  color: #ffd2d6;
+}
+
+.model3d-save-button {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid rgba(97, 199, 232, 0.26);
+  border-radius: 8px;
+  background: rgba(97, 199, 232, 0.08);
+  color: #d2edf5;
+  cursor: pointer;
+  padding: 0 10px;
+  font-size: 10px;
+  font-weight: 660;
+}
+
+.model3d-save-button:hover {
+  border-color: rgba(97, 199, 232, 0.48);
+  background: rgba(97, 199, 232, 0.14);
+}
+
+.model3d-save-button.saved {
+  border-color: rgba(98, 214, 142, 0.42);
+  background: rgba(98, 214, 142, 0.12);
+  color: #c8f6d8;
+}
+
+.model3d-save-button.error {
+  border-color: rgba(241, 139, 147, 0.4);
+  background: rgba(241, 139, 147, 0.1);
+  color: #ffd1d5;
+}
+
 .model3d-body {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(0, 1fr) 316px;
+  grid-template-columns: minmax(0, 1fr) 336px;
 }
 
 .model3d-stage {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 48px auto minmax(0, 1fr);
   gap: 12px;
   padding: 12px;
 }
@@ -209,6 +270,14 @@
     0 1px 0 rgba(255, 255, 255, 0.035) inset;
 }
 
+.model3d-viewport.drag-active {
+  border-color: rgba(97, 199, 232, 0.72);
+  box-shadow:
+    0 0 0 3px rgba(97, 199, 232, 0.1),
+    0 24px 58px rgba(0, 0, 0, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.05) inset;
+}
+
 .model3d-viewport-host,
 .model3d-canvas {
   width: 100%;
@@ -226,6 +295,10 @@
   touch-action: none;
 }
 
+.model3d-canvas.is-panning {
+  cursor: grabbing;
+}
+
 .model3d-empty-state,
 .model3d-loading-state {
   position: absolute;
@@ -240,6 +313,163 @@
   padding: 24px;
   text-align: center;
   pointer-events: none;
+}
+
+.model3d-viewport-hint {
+  position: absolute;
+  z-index: 3;
+  top: 9px;
+  left: 9px;
+  display: flex;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.model3d-viewport-hint span {
+  border: 1px solid rgba(172, 184, 198, 0.14);
+  border-radius: 6px;
+  background: rgba(5, 9, 13, 0.68);
+  color: #8e9cab;
+  padding: 4px 7px;
+  font-size: 9px;
+  backdrop-filter: blur(8px);
+}
+
+.model3d-library {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(172, 184, 198, 0.12);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.018);
+  padding: 9px;
+}
+
+.model3d-library-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model3d-library-head > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.model3d-library-head strong {
+  color: #e5ebf0;
+  font-size: 11px;
+}
+
+.model3d-library-head span {
+  color: #687685;
+  font-size: 9px;
+}
+
+.model3d-library-head > button {
+  display: inline-flex;
+  height: 27px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(97, 199, 232, 0.24);
+  border-radius: 6px;
+  background: rgba(97, 199, 232, 0.07);
+  color: #c6e7f1;
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 9px;
+}
+
+.model3d-library-head > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.model3d-parametric-create {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 34px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(97, 199, 232, 0.25);
+  border-radius: 8px;
+  background: rgba(97, 199, 232, 0.055);
+  color: #dcebf1;
+  cursor: pointer;
+  padding: 7px;
+  text-align: left;
+}
+
+.model3d-parametric-create-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.model3d-parametric-create-list .model3d-parametric-create {
+  grid-template-columns: 34px minmax(0, 1fr) 16px;
+  min-width: 0;
+}
+
+.model3d-parametric-create:hover {
+  border-color: rgba(97, 199, 232, 0.48);
+  background: rgba(97, 199, 232, 0.1);
+}
+
+.model3d-parametric-create > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.model3d-parametric-create strong {
+  font-size: 10px;
+}
+
+.model3d-parametric-create small {
+  overflow: hidden;
+  color: #718392;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model3d-parametric-create > svg {
+  color: #8fd9ef;
+}
+
+.model3d-model-glyph.parametric svg {
+  transform: rotate(-7deg);
+}
+
+.model3d-model-glyph.cylinder::before {
+  width: 18px;
+  height: 23px;
+  border: 2px solid currentColor;
+  border-radius: 50% / 14%;
+  box-shadow: 0 -4px 0 -2px currentColor inset;
+  content: '';
+}
+
+.model3d-model-glyph.cuboid svg {
+  transform: scaleX(1.14);
+}
+
+.model3d-model-glyph {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--model-card-color) 32%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--model-card-color) 11%, transparent);
+  color: var(--model-card-color);
+}
+
+.model3d-model-glyph.lid svg {
+  transform: translateY(-2px) rotate(-5deg);
 }
 
 .model3d-empty-state > svg,
@@ -324,6 +554,361 @@
 .model3d-section-title strong {
   font-size: 12px;
   font-weight: 720;
+}
+
+.model3d-section-title-spread {
+  justify-content: space-between;
+}
+
+.model3d-section-title-spread > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model3d-section-title-spread > small {
+  color: #667483;
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.model3d-scene-list {
+  display: grid;
+  max-height: 136px;
+  gap: 5px;
+  overflow-y: auto;
+}
+
+.model3d-scene-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 4px;
+  border: 1px solid rgba(172, 184, 198, 0.1);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.model3d-scene-item.selected {
+  border-color: rgba(97, 199, 232, 0.38);
+  background: rgba(97, 199, 232, 0.07);
+}
+
+.model3d-scene-item button {
+  min-width: 0;
+  height: 29px;
+  border: 0;
+  background: transparent;
+  color: #98a6b4;
+  cursor: pointer;
+}
+
+.model3d-scene-item > button:first-child {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.model3d-scene-item > button:first-child span {
+  overflow: hidden;
+  color: #cbd5de;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model3d-scene-item > button:last-child {
+  display: grid;
+  place-items: center;
+  color: #667483;
+}
+
+.model3d-scene-item > button:last-child:hover {
+  color: #f18b93;
+}
+
+.model3d-scene-empty {
+  display: grid;
+  min-height: 52px;
+  place-items: center;
+  border: 1px dashed rgba(172, 184, 198, 0.13);
+  border-radius: 7px;
+  color: #667483;
+  font-size: 9px;
+  text-align: center;
+}
+
+.model3d-transform-toolbar {
+  display: grid;
+  grid-template-columns: 1fr 1fr 34px 34px;
+  gap: 5px;
+}
+
+.model3d-transform-toolbar button {
+  display: inline-flex;
+  height: 31px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid rgba(172, 184, 198, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #9eabb7;
+  cursor: pointer;
+  padding: 0 7px;
+  font-size: 9px;
+}
+
+.model3d-transform-toolbar button:hover:not(:disabled),
+.model3d-transform-toolbar button.active {
+  border-color: rgba(97, 199, 232, 0.36);
+  background: rgba(97, 199, 232, 0.08);
+  color: #d9eef4;
+}
+
+.model3d-transform-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.model3d-coordinate-space {
+  display: grid;
+  gap: 6px;
+}
+
+.model3d-coordinate-space > span {
+  color: #8997a4;
+  font-size: 9px;
+}
+
+.model3d-coordinate-space > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+
+.model3d-coordinate-space button {
+  height: 29px;
+  border: 1px solid rgba(172, 184, 198, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+  color: #8d9aa7;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.model3d-coordinate-space button:hover:not(:disabled),
+.model3d-coordinate-space button.active {
+  border-color: rgba(97, 199, 232, 0.38);
+  background: rgba(97, 199, 232, 0.09);
+  color: #d9eef4;
+}
+
+.model3d-coordinate-space button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.model3d-coordinate-space small {
+  color: #63717f;
+  font-size: 8px;
+}
+
+.model3d-transform-panel {
+  display: grid;
+  gap: 9px;
+}
+
+.model3d-parametric-panel {
+  display: grid;
+  gap: 9px;
+  border: 1px solid rgba(97, 199, 232, 0.18);
+  border-radius: 8px;
+  background: rgba(97, 199, 232, 0.035);
+  padding: 9px;
+}
+
+.model3d-parametric-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.model3d-parametric-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #dce8ed;
+  font-size: 10px;
+  font-weight: 680;
+}
+
+.model3d-parametric-head small {
+  color: #637483;
+  font-size: 8px;
+}
+
+.model3d-parametric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.model3d-parametric-grid label {
+  display: grid;
+  gap: 4px;
+}
+
+.model3d-parametric-grid span,
+.model3d-parametric-colors span {
+  color: #7f8e9b;
+  font-size: 8px;
+}
+
+.model3d-parametric-grid input {
+  width: 100%;
+  height: 29px;
+  border: 1px solid rgba(172, 184, 198, 0.14);
+  border-radius: 6px;
+  outline: none;
+  background: rgba(7, 11, 16, 0.52);
+  color: #dce6ed;
+  padding: 0 7px;
+  font-size: 9px;
+}
+
+.model3d-parametric-grid input:focus {
+  border-color: rgba(97, 199, 232, 0.42);
+}
+
+.model3d-pose-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+}
+
+.model3d-pose-options button {
+  height: 28px;
+  border: 1px solid rgba(172, 184, 198, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+  color: #8998a5;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.model3d-pose-options button:hover,
+.model3d-pose-options button.active {
+  border-color: rgba(97, 199, 232, 0.4);
+  background: rgba(97, 199, 232, 0.1);
+  color: #dff4f9;
+}
+
+.model3d-parametric-colors {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.model3d-parametric-colors.single {
+  grid-template-columns: 1fr;
+}
+
+.model3d-parametric-colors label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 29px;
+  align-items: center;
+  gap: 5px;
+}
+
+.model3d-parametric-colors input {
+  width: 29px;
+  height: 25px;
+  border: 1px solid rgba(172, 184, 198, 0.16);
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.model3d-parametric-split {
+  display: inline-flex;
+  width: 100%;
+  height: 31px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid rgba(97, 199, 232, 0.3);
+  border-radius: 7px;
+  background: rgba(97, 199, 232, 0.08);
+  color: #d9eff5;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 660;
+}
+
+.model3d-parametric-split:hover {
+  border-color: rgba(97, 199, 232, 0.52);
+  background: rgba(97, 199, 232, 0.14);
+}
+
+.model3d-parametric-note {
+  color: #617382;
+  font-size: 8px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.model3d-transform-group {
+  display: grid;
+  gap: 6px;
+}
+
+.model3d-transform-group > span {
+  color: #8997a4;
+  font-size: 9px;
+}
+
+.model3d-transform-group > div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.model3d-transform-group label {
+  display: grid;
+  height: 29px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(172, 184, 198, 0.14);
+  border-radius: 6px;
+  background: rgba(7, 11, 16, 0.48);
+}
+
+.model3d-transform-group label:focus-within {
+  border-color: rgba(97, 199, 232, 0.42);
+}
+
+.model3d-transform-group i {
+  color: #697887;
+  font-size: 8px;
+  font-style: normal;
+  text-align: center;
+}
+
+.model3d-transform-group input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #dce5ec;
+  padding: 0 4px;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
 }
 
 .model3d-field,
@@ -818,6 +1403,11 @@
 
   .model3d-stage {
     min-height: 440px;
+  }
+
+  .model3d-library-head span,
+  .model3d-viewport-hint span:last-child {
+    display: none;
   }
 
   .model3d-file-summary span {

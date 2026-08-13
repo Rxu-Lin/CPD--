@@ -1,7 +1,27 @@
 import { useEffect, useRef, useState, type CSSProperties, type ChangeEvent, type DragEvent } from 'react'
-import { Box, Camera, Check, ImagePlus, Loader2, MoveUpRight, RefreshCw, Sun, Upload, X } from 'lucide-react'
+import {
+  Box,
+  Camera,
+  Check,
+  Copy,
+  Focus,
+  ImagePlus,
+  Layers3,
+  Loader2,
+  Move3D,
+  MoveUpRight,
+  Plus,
+  RefreshCw,
+  RotateCw,
+  Save,
+  Sun,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import './Model3DStudio.css'
 
 type ViewportPreset = {
@@ -17,6 +37,108 @@ type ModelStats = {
   triangles: number
 }
 
+type ParametricBoxPose = 'closed' | 'open' | 'separated'
+
+type ParametricBoxSettings = {
+  length: number
+  width: number
+  baseHeight: number
+  lidHeight: number
+  thickness: number
+  gap: number
+  pose: ParametricBoxPose
+  baseColor: string
+  lidColor: string
+}
+
+type ParametricBoxData = {
+  settings: ParametricBoxSettings
+  baseMaterial: THREE.MeshStandardMaterial
+  lidMaterial: THREE.MeshStandardMaterial
+}
+
+type ParametricBoxPartData = {
+  part: 'base' | 'lid'
+  settings: ParametricBoxSettings
+}
+
+type ParametricPrimitiveKind = 'cylinder' | 'cuboid'
+
+type ParametricPrimitiveSettings = {
+  kind: ParametricPrimitiveKind
+  radius: number
+  height: number
+  length: number
+  width: number
+  color: string
+}
+
+type ParametricPrimitiveData = {
+  settings: ParametricPrimitiveSettings
+}
+
+type SceneItem = {
+  id: string
+  name: string
+  format: string
+  object: THREE.Object3D
+  material: THREE.MeshStandardMaterial
+  stats: ModelStats
+  parametricBox?: ParametricBoxData
+  parametricBoxPart?: ParametricBoxPartData
+  parametricPrimitive?: ParametricPrimitiveData
+}
+
+type SavedTransform = {
+  position: [number, number, number]
+  quaternion: [number, number, number, number]
+  scale: [number, number, number]
+}
+
+type SavedModel3DItem = {
+  kind: 'parametric-box' | 'parametric-part' | 'parametric-primitive'
+  name: string
+  transform: SavedTransform
+  settings?: ParametricBoxSettings
+  primitiveSettings?: ParametricPrimitiveSettings
+  part?: 'base' | 'lid'
+}
+
+type SavedModel3DScene = {
+  version: 1
+  savedAt: string
+  items: SavedModel3DItem[]
+  selectedIndex: number
+  viewportId: string
+  backgroundColor: string
+  focalLength: number
+  showProjection: boolean
+  lightEnabled: boolean
+  lightIntensity: number
+  lightAzimuth: number
+  lightElevation: number
+  camera: {
+    position: [number, number, number]
+    up: [number, number, number]
+    target: [number, number, number]
+  }
+}
+
+type SceneItemSnapshot = {
+  item: SceneItem
+  position: [number, number, number]
+  quaternion: [number, number, number, number]
+  scale: [number, number, number]
+  color: string
+  parametricBox?: ParametricBoxSettings
+  parametricPrimitive?: ParametricPrimitiveSettings
+}
+
+type SceneHistorySnapshot = {
+  items: SceneItemSnapshot[]
+  selectedItemId: string | null
+}
+
 type Model3DStudioProps = {
   onClose: () => void
   onExport: (result: { dataUrl: string; fileName: string; width: number; height: number }) => void
@@ -27,10 +149,17 @@ type PreviewRuntime = {
   scene: THREE.Scene
   camera: THREE.PerspectiveCamera
   controls: OrbitControls
+  transformControls: TransformControls
+  selectionBox: THREE.BoxHelper
+  hemisphere: THREE.HemisphereLight
   keyLight: THREE.DirectionalLight
+  rimLight: THREE.DirectionalLight
   ground: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>
   resize: () => void
 }
+
+type TransformMode = 'translate' | 'rotate'
+type TransformSpace = 'world' | 'local'
 
 const viewportPresets: ViewportPreset[] = [
   { id: 'square', label: '1:1', width: 1024, height: 1024 },
@@ -41,11 +170,47 @@ const viewportPresets: ViewportPreset[] = [
   { id: 'portrait-tall', label: '2:3', width: 800, height: 1200 },
 ]
 
+const defaultParametricBoxSettings: ParametricBoxSettings = {
+  length: 320,
+  width: 240,
+  baseHeight: 120,
+  lidHeight: 55,
+  thickness: 12,
+  gap: 6,
+  pose: 'separated',
+  baseColor: '#B8C7D6',
+  lidColor: '#D6C2B8',
+}
+
+const defaultCylinderSettings: ParametricPrimitiveSettings = {
+  kind: 'cylinder',
+  radius: 100,
+  height: 220,
+  length: 200,
+  width: 200,
+  color: '#AFC9D8',
+}
+
+const defaultCuboidSettings: ParametricPrimitiveSettings = {
+  kind: 'cuboid',
+  radius: 100,
+  height: 180,
+  length: 260,
+  width: 200,
+  color: '#C9B9A9',
+}
+
 const defaultModelColor = '#b8c7d6'
 const defaultBackgroundColor = '#111820'
 const defaultLightAzimuth = -55
 const defaultLightElevation = 38
+const defaultLightIntensity = 100
+const defaultHemisphereIntensity = 1.65
+const unlitPreviewHemisphereIntensity = 1.3
+const defaultKeyLightIntensity = 4.2
+const defaultRimLightIntensity = 1.15
 const maximumModelFileSize = 100 * 1024 * 1024
+const model3DSceneStorageKey = 'cpd-model3d-scene-v1'
 
 function setDirectionalLightPosition(
   light: THREE.DirectionalLight,
@@ -111,34 +276,406 @@ function collectModelStats(object: THREE.Object3D): ModelStats {
   return stats
 }
 
+function disposeObjectGeometries(object: THREE.Object3D) {
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh
+    if (mesh.isMesh) mesh.geometry?.dispose()
+  })
+}
+
+function addBoxPanel(
+  group: THREE.Group,
+  size: [number, number, number],
+  position: [number, number, number],
+  material: THREE.MeshStandardMaterial,
+) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material)
+  mesh.position.set(...position)
+  mesh.castShadow = true
+  mesh.receiveShadow = true
+  group.add(mesh)
+}
+
+function buildOpenBoxGeometry(
+  group: THREE.Group,
+  dimensions: { length: number; width: number; height: number; thickness: number; inverted?: boolean },
+  material: THREE.MeshStandardMaterial,
+) {
+  const { length, width, height, thickness, inverted = false } = dimensions
+  const wallHeight = Math.max(thickness, height - thickness)
+  const wallCenterY = inverted ? wallHeight / 2 : thickness + wallHeight / 2
+  const panelY = inverted ? height - thickness / 2 : thickness / 2
+  addBoxPanel(group, [length, thickness, width], [0, panelY, 0], material)
+  addBoxPanel(group, [length, wallHeight, thickness], [0, wallCenterY, (width - thickness) / 2], material)
+  addBoxPanel(group, [length, wallHeight, thickness], [0, wallCenterY, -(width - thickness) / 2], material)
+  addBoxPanel(group, [thickness, wallHeight, Math.max(thickness, width - thickness * 2)], [(length - thickness) / 2, wallCenterY, 0], material)
+  addBoxPanel(group, [thickness, wallHeight, Math.max(thickness, width - thickness * 2)], [-(length - thickness) / 2, wallCenterY, 0], material)
+}
+
+function readSavedModel3DScene(): SavedModel3DScene | null {
+  try {
+    const source = window.localStorage.getItem(model3DSceneStorageKey)
+    if (!source) return null
+    const parsed = JSON.parse(source) as SavedModel3DScene
+    return parsed?.version === 1 && Array.isArray(parsed.items) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function savedTransformFromObject(object: THREE.Object3D): SavedTransform {
+  return {
+    position: [object.position.x, object.position.y, object.position.z],
+    quaternion: [object.quaternion.x, object.quaternion.y, object.quaternion.z, object.quaternion.w],
+    scale: [object.scale.x, object.scale.y, object.scale.z],
+  }
+}
+
+function applySavedTransform(object: THREE.Object3D, transform: SavedTransform) {
+  object.position.fromArray(transform.position)
+  object.quaternion.fromArray(transform.quaternion)
+  object.scale.fromArray(transform.scale)
+  object.updateMatrixWorld(true)
+}
+
+function sceneObjectIdFromIntersection(object: THREE.Object3D | null) {
+  let current = object
+  while (current) {
+    if (typeof current.userData.sceneItemId === 'string') return current.userData.sceneItemId as string
+    current = current.parent
+  }
+  return null
+}
+
+function transformValue(value: number) {
+  return Number(value.toFixed(2))
+}
+
+function sceneSnapshotSignature(snapshot: SceneHistorySnapshot) {
+  return JSON.stringify({
+    selectedItemId: snapshot.selectedItemId,
+    items: snapshot.items.map(({ item, position, quaternion, scale, color, parametricBox, parametricPrimitive }) => ({
+      id: item.id,
+      position,
+      quaternion,
+      scale,
+      color,
+      parametricBox,
+      parametricPrimitive,
+    })),
+  })
+}
+
 export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const viewportHostRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<PreviewRuntime | null>(null)
-  const modelRef = useRef<THREE.Object3D | null>(null)
-  const modelMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null)
+  const sceneItemsRef = useRef<SceneItem[]>([])
+  const allSceneItemsRef = useRef(new Set<SceneItem>())
+  const selectedItemIdRef = useRef<string | null>(null)
+  const sceneHistoryRef = useRef<SceneHistorySnapshot[]>([])
+  const transformStartSnapshotRef = useRef<SceneHistorySnapshot | null>(null)
+  const parameterEditSnapshotRef = useRef<SceneHistorySnapshot | null>(null)
+  const savedCameraRef = useRef<SavedModel3DScene['camera'] | null>(null)
   const animationFrameRef = useRef(0)
   const loadSequenceRef = useRef(0)
-  const [fileName, setFileName] = useState('')
-  const [modelFormat, setModelFormat] = useState('')
-  const [modelStats, setModelStats] = useState<ModelStats | null>(null)
+  const selectSceneItemRef = useRef<(id: string | null) => void>(() => undefined)
+  const deleteSelectedItemRef = useRef<() => void>(() => undefined)
+  const undoSceneRef = useRef<() => void>(() => undefined)
+  const restoreSavedSceneRef = useRef<(saved: SavedModel3DScene) => void>(() => undefined)
+  const updateSceneBoundsRef = useRef<(fitCamera?: boolean) => void>(() => undefined)
+  const [sceneItems, setSceneItems] = useState<SceneItem[]>([])
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
+  const [transformMode, setTransformMode] = useState<TransformMode>('translate')
+  const [transformSpace, setTransformSpace] = useState<TransformSpace>('world')
+  const [transformRevision, setTransformRevision] = useState(0)
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
+  const [draggingOverViewport, setDraggingOverViewport] = useState(false)
   const [error, setError] = useState('')
   const [modelColor, setModelColor] = useState(defaultModelColor)
   const [backgroundColor, setBackgroundColor] = useState(defaultBackgroundColor)
   const [focalLength, setFocalLength] = useState(50)
   const [cameraDistance, setCameraDistance] = useState(5)
   const [showProjection, setShowProjection] = useState(false)
+  const [lightEnabled, setLightEnabled] = useState(true)
+  const [lightIntensity, setLightIntensity] = useState(defaultLightIntensity)
   const [lightAzimuth, setLightAzimuth] = useState(defaultLightAzimuth)
   const [lightElevation, setLightElevation] = useState(defaultLightElevation)
   const [viewportId, setViewportId] = useState('square')
   const viewport = viewportPresets.find((item) => item.id === viewportId) || viewportPresets[0]
-  const hasModel = Boolean(modelRef.current && fileName)
+  const selectedItem = sceneItems.find((item) => item.id === selectedItemId) || null
+  const hasModel = sceneItems.length > 0
+  const totalStats = sceneItems.reduce<ModelStats>((total, item) => ({
+    meshes: total.meshes + item.stats.meshes,
+    vertices: total.vertices + item.stats.vertices,
+    triangles: total.triangles + item.stats.triangles,
+  }), { meshes: 0, vertices: 0, triangles: 0 })
+
+  function saveSceneLocally() {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const items = sceneItemsRef.current.flatMap<SavedModel3DItem>((item) => {
+      if (item.parametricBox) {
+        return [{
+          kind: 'parametric-box',
+          name: item.name,
+          transform: savedTransformFromObject(item.object),
+          settings: { ...item.parametricBox.settings },
+        }]
+      }
+      if (item.parametricBoxPart) {
+        return [{
+          kind: 'parametric-part',
+          name: item.name,
+          transform: savedTransformFromObject(item.object),
+          settings: { ...item.parametricBoxPart.settings },
+          part: item.parametricBoxPart.part,
+        }]
+      }
+      if (item.parametricPrimitive) {
+        return [{
+          kind: 'parametric-primitive',
+          name: item.name,
+          transform: savedTransformFromObject(item.object),
+          primitiveSettings: { ...item.parametricPrimitive.settings },
+        }]
+      }
+      return []
+    })
+    const selectedIndex = sceneItemsRef.current.findIndex((item) => item.id === selectedItemIdRef.current)
+    const saved: SavedModel3DScene = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      items,
+      selectedIndex,
+      viewportId,
+      backgroundColor,
+      focalLength,
+      showProjection,
+      lightEnabled,
+      lightIntensity,
+      lightAzimuth,
+      lightElevation,
+      camera: {
+        position: [runtime.camera.position.x, runtime.camera.position.y, runtime.camera.position.z],
+        up: [runtime.camera.up.x, runtime.camera.up.y, runtime.camera.up.z],
+        target: [runtime.controls.target.x, runtime.controls.target.y, runtime.controls.target.z],
+      },
+    }
+    try {
+      window.localStorage.setItem(model3DSceneStorageKey, JSON.stringify(saved))
+      setSaveStatus('saved')
+      window.setTimeout(() => setSaveStatus('idle'), 1800)
+    } catch {
+      setSaveStatus('error')
+      setError('3D 场景保存失败，请检查浏览器存储权限。')
+    }
+  }
+
+  function resetSceneAndSavedData() {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    loadSequenceRef.current += 1
+    window.localStorage.removeItem(model3DSceneStorageKey)
+    runtime.transformControls.detach()
+    runtime.selectionBox.visible = false
+    allSceneItemsRef.current.forEach((item) => {
+      runtime.scene.remove(item.object)
+      disposeModel(item.object, item.material)
+    })
+    allSceneItemsRef.current.clear()
+    sceneItemsRef.current = []
+    sceneHistoryRef.current = []
+    transformStartSnapshotRef.current = null
+    parameterEditSnapshotRef.current = null
+    savedCameraRef.current = null
+    selectedItemIdRef.current = null
+    setSceneItems([])
+    setSelectedItemId(null)
+    setLoading(false)
+    setModelColor(defaultModelColor)
+    setBackgroundColor(defaultBackgroundColor)
+    setFocalLength(50)
+    setShowProjection(false)
+    setLightEnabled(true)
+    setLightIntensity(defaultLightIntensity)
+    setLightAzimuth(defaultLightAzimuth)
+    setLightElevation(defaultLightElevation)
+    setViewportId('square')
+    setTransformMode('translate')
+    setTransformSpace('world')
+    setError('')
+    setSaveStatus('idle')
+    runtime.camera.position.set(5.6, 3.5, 6.4)
+    runtime.camera.up.set(0, 1, 0)
+    runtime.camera.setFocalLength(50)
+    runtime.camera.updateProjectionMatrix()
+    runtime.controls.minDistance = 0
+    runtime.controls.maxDistance = Infinity
+    runtime.controls.target.set(0, 0, 0)
+    runtime.controls.update()
+    runtime.controls.saveState()
+    runtime.ground.visible = false
+    runtime.renderer.setClearColor(defaultBackgroundColor)
+    runtime.hemisphere.intensity = defaultHemisphereIntensity
+    runtime.keyLight.intensity = defaultKeyLightIntensity
+    runtime.rimLight.intensity = defaultRimLightIntensity
+    setDirectionalLightPosition(runtime.keyLight, runtime.controls.target, defaultLightAzimuth, defaultLightElevation)
+    setCameraDistance(Number(runtime.controls.getDistance().toFixed(2)))
+    runtime.renderer.shadowMap.needsUpdate = true
+  }
+
+  function syncSceneItems() {
+    setSceneItems([...sceneItemsRef.current])
+    setTransformRevision((revision) => revision + 1)
+  }
+
+  function selectSceneItem(id: string | null) {
+    selectedItemIdRef.current = id
+    setSelectedItemId(id)
+    const item = sceneItemsRef.current.find((candidate) => candidate.id === id)
+    if (item) setModelColor(`#${item.material.color.getHexString()}`)
+  }
+  selectSceneItemRef.current = selectSceneItem
+
+  function captureSceneSnapshot(): SceneHistorySnapshot {
+    return {
+      selectedItemId: selectedItemIdRef.current,
+      items: sceneItemsRef.current.map((item) => ({
+        item,
+        position: [item.object.position.x, item.object.position.y, item.object.position.z],
+        quaternion: [item.object.quaternion.x, item.object.quaternion.y, item.object.quaternion.z, item.object.quaternion.w],
+        scale: [item.object.scale.x, item.object.scale.y, item.object.scale.z],
+        color: `#${item.material.color.getHexString()}`,
+        parametricBox: item.parametricBox ? { ...item.parametricBox.settings } : undefined,
+        parametricPrimitive: item.parametricPrimitive ? { ...item.parametricPrimitive.settings } : undefined,
+      })),
+    }
+  }
+
+  function pushSceneHistory(snapshot = captureSceneSnapshot()) {
+    const history = sceneHistoryRef.current
+    if (history.length && sceneSnapshotSignature(history.at(-1)!) === sceneSnapshotSignature(snapshot)) return
+    sceneHistoryRef.current = [...history.slice(-49), snapshot]
+  }
+
+  function restoreSceneSnapshot(snapshot: SceneHistorySnapshot) {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const restoredItems = snapshot.items.map(({ item, position, quaternion, scale, color, parametricBox, parametricPrimitive }) => {
+      if (item.object.parent !== runtime.scene) runtime.scene.add(item.object)
+      item.object.position.fromArray(position)
+      item.object.quaternion.fromArray(quaternion)
+      item.object.scale.fromArray(scale)
+      item.material.color.set(color)
+      item.material.needsUpdate = true
+      if (parametricBox && item.parametricBox) {
+        item.parametricBox.settings = { ...parametricBox }
+        rebuildParametricBox(item)
+      }
+      if (parametricPrimitive && item.parametricPrimitive) {
+        item.parametricPrimitive.settings = { ...parametricPrimitive }
+        rebuildParametricPrimitive(item)
+      }
+      item.object.updateMatrixWorld(true)
+      return item
+    })
+    sceneItemsRef.current.forEach((item) => {
+      if (!restoredItems.includes(item)) runtime.scene.remove(item.object)
+    })
+    sceneItemsRef.current = restoredItems
+    syncSceneItems()
+    const selection = restoredItems.some((item) => item.id === snapshot.selectedItemId)
+      ? snapshot.selectedItemId
+      : restoredItems.at(-1)?.id || null
+    selectSceneItem(selection)
+    if (restoredItems.length) updateSceneBounds(false)
+    else {
+      runtime.transformControls.detach()
+      runtime.selectionBox.visible = false
+    }
+  }
+
+  function undoScene() {
+    const snapshot = sceneHistoryRef.current.at(-1)
+    if (!snapshot) return
+    sceneHistoryRef.current = sceneHistoryRef.current.slice(0, -1)
+    restoreSceneSnapshot(snapshot)
+  }
+  undoSceneRef.current = undoScene
+
+  function updateSceneBounds(fitCamera = false) {
+    const runtime = runtimeRef.current
+    if (!runtime || sceneItemsRef.current.length === 0) return
+    const sceneBox = new THREE.Box3()
+    sceneItemsRef.current.forEach((item) => {
+      item.object.updateMatrixWorld(true)
+      sceneBox.expandByObject(item.object)
+    })
+    if (sceneBox.isEmpty()) return
+
+    const sphere = sceneBox.getBoundingSphere(new THREE.Sphere())
+    const radius = Math.max(sphere.radius, 0.5)
+    runtime.ground.position.y = sceneBox.min.y - 0.025
+    const shadowExtent = Math.max(6, radius * 4.2)
+    runtime.keyLight.shadow.camera.left = -shadowExtent
+    runtime.keyLight.shadow.camera.right = shadowExtent
+    runtime.keyLight.shadow.camera.top = shadowExtent
+    runtime.keyLight.shadow.camera.bottom = -shadowExtent
+    runtime.keyLight.shadow.camera.updateProjectionMatrix()
+
+    if (fitCamera) {
+      const halfFov = THREE.MathUtils.degToRad(runtime.camera.fov * 0.5)
+      const distance = (radius / Math.sin(halfFov)) * 1.35
+      const currentDirection = runtime.camera.position.clone().sub(runtime.controls.target)
+      const direction = currentDirection.lengthSq() > 0
+        ? currentDirection.normalize()
+        : new THREE.Vector3(1, 0.62, 1).normalize()
+      runtime.controls.target.copy(sphere.center)
+      runtime.camera.position.copy(sphere.center).addScaledVector(direction, distance)
+      runtime.camera.near = Math.max(0.01, distance / 1000)
+      runtime.camera.far = Math.max(100, distance * 100)
+      runtime.camera.updateProjectionMatrix()
+      runtime.controls.minDistance = Math.max(0.15, radius * 0.22)
+      runtime.controls.maxDistance = Math.max(30, radius * 24)
+      runtime.controls.update()
+      runtime.controls.saveState()
+      setCameraDistance(Number(runtime.controls.getDistance().toFixed(2)))
+    }
+
+    setDirectionalLightPosition(runtime.keyLight, runtime.controls.target, lightAzimuth, lightElevation)
+    runtime.renderer.shadowMap.needsUpdate = true
+  }
+  updateSceneBoundsRef.current = updateSceneBounds
+
+  function deleteSceneItem(id: string, recordHistory = true) {
+    const runtime = runtimeRef.current
+    const item = sceneItemsRef.current.find((candidate) => candidate.id === id)
+    if (!runtime || !item) return
+    if (recordHistory) pushSceneHistory()
+    if (selectedItemIdRef.current === id) {
+      runtime.transformControls.detach()
+      runtime.selectionBox.visible = false
+    }
+    runtime.scene.remove(item.object)
+    sceneItemsRef.current = sceneItemsRef.current.filter((candidate) => candidate.id !== id)
+    const nextSelection = sceneItemsRef.current.at(-1)?.id || null
+    syncSceneItems()
+    selectSceneItem(nextSelection)
+    if (sceneItemsRef.current.length) updateSceneBounds(false)
+  }
+
+  function deleteSelectedItem() {
+    if (selectedItemIdRef.current) deleteSceneItem(selectedItemIdRef.current)
+  }
+  deleteSelectedItemRef.current = deleteSelectedItem
 
   useEffect(() => {
     const host = viewportHostRef.current
     if (!host) return
+    const allSceneItems = allSceneItemsRef.current
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -159,29 +696,42 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 1000)
     camera.setFocalLength(50)
-    camera.position.set(3.8, 2.4, 4.4)
+    camera.position.set(5.6, 3.5, 6.4)
 
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.075
     controls.screenSpacePanning = true
     controls.zoomToCursor = true
+    controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN
     controls.minPolarAngle = 0.03
     controls.maxPolarAngle = Math.PI - 0.03
     controls.target.set(0, 0, 0)
 
-    const hemisphere = new THREE.HemisphereLight(0xf4f8ff, 0x24303b, 1.65)
+    const transformControls = new TransformControls(camera, renderer.domElement)
+    transformControls.setMode('translate')
+    transformControls.setSize(0.82)
+    scene.add(transformControls.getHelper())
+
+    const selectionBox = new THREE.BoxHelper(new THREE.Object3D(), 0x74d8f3)
+    selectionBox.visible = false
+    selectionBox.material.depthTest = false
+    selectionBox.material.transparent = true
+    selectionBox.material.opacity = 0.78
+    scene.add(selectionBox)
+
+    const hemisphere = new THREE.HemisphereLight(0xf4f8ff, 0x24303b, defaultHemisphereIntensity)
     scene.add(hemisphere)
 
-    const keyLight = new THREE.DirectionalLight(0xffffff, 4.2)
+    const keyLight = new THREE.DirectionalLight(0xffffff, defaultKeyLightIntensity)
     keyLight.castShadow = true
     keyLight.shadow.mapSize.set(2048, 2048)
     keyLight.shadow.camera.near = 0.1
     keyLight.shadow.camera.far = 40
-    keyLight.shadow.camera.left = -5
-    keyLight.shadow.camera.right = 5
-    keyLight.shadow.camera.top = 5
-    keyLight.shadow.camera.bottom = -5
+    keyLight.shadow.camera.left = -8
+    keyLight.shadow.camera.right = 8
+    keyLight.shadow.camera.top = 8
+    keyLight.shadow.camera.bottom = -8
     keyLight.shadow.bias = -0.00035
     keyLight.shadow.normalBias = 0.035
     keyLight.shadow.radius = 3
@@ -189,18 +739,14 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     scene.add(keyLight.target)
     setDirectionalLightPosition(keyLight, controls.target, defaultLightAzimuth, defaultLightElevation)
 
-    const rimLight = new THREE.DirectionalLight(0x8fcde3, 1.15)
+    const rimLight = new THREE.DirectionalLight(0x8fcde3, defaultRimLightIntensity)
     rimLight.position.set(-5, 3, -4)
     scene.add(rimLight)
 
-    const groundMaterial = new THREE.MeshStandardMaterial({
-      color: 0x18212a,
-      roughness: 1,
-      metalness: 0,
-    })
+    const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x18212a, roughness: 1, metalness: 0 })
     const ground = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), groundMaterial)
     ground.rotation.x = -Math.PI / 2
-    ground.position.y = -1.61
+    ground.position.y = -0.02
     ground.receiveShadow = true
     ground.visible = false
     scene.add(ground)
@@ -214,19 +760,67 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
       camera.updateProjectionMatrix()
     }
 
-    const updateDistance = () => {
-      setCameraDistance(Number(controls.getDistance().toFixed(2)))
+    const updateDistance = () => setCameraDistance(Number(controls.getDistance().toFixed(2)))
+    const handleDraggingChanged = (event: { value?: unknown }) => {
+      controls.enabled = !event.value
+    }
+    const handleObjectChange = () => {
+      selectionBox.update()
+      setTransformRevision((revision) => revision + 1)
+    }
+    const handleTransformStart = () => {
+      transformStartSnapshotRef.current = captureSceneSnapshot()
+    }
+    const handleTransformEnd = () => {
+      const startSnapshot = transformStartSnapshotRef.current
+      transformStartSnapshotRef.current = null
+      if (startSnapshot && sceneSnapshotSignature(startSnapshot) !== sceneSnapshotSignature(captureSceneSnapshot())) {
+        pushSceneHistory(startSnapshot)
+      }
+      updateSceneBoundsRef.current(false)
     }
     controls.addEventListener('end', updateDistance)
+    transformControls.addEventListener('dragging-changed', handleDraggingChanged)
+    transformControls.addEventListener('objectChange', handleObjectChange)
+    transformControls.addEventListener('mouseDown', handleTransformStart)
+    transformControls.addEventListener('mouseUp', handleTransformEnd)
 
-    runtimeRef.current = { renderer, scene, camera, controls, keyLight, ground, resize }
+    const raycaster = new THREE.Raycaster()
+    const pointer = new THREE.Vector2()
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button === 1) renderer.domElement.classList.add('is-panning')
+      if (event.button !== 0 || transformControls.dragging) return
+      const rect = renderer.domElement.getBoundingClientRect()
+      pointer.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      )
+      raycaster.setFromCamera(pointer, camera)
+      const candidates = sceneItemsRef.current.map((item) => item.object)
+      const hit = raycaster.intersectObjects(candidates, true)[0]
+      selectSceneItemRef.current(sceneObjectIdFromIntersection(hit?.object || null))
+    }
+    const handlePointerRelease = () => renderer.domElement.classList.remove('is-panning')
+    const preventMiddleClick = (event: MouseEvent) => {
+      if (event.button === 1) event.preventDefault()
+    }
+    renderer.domElement.addEventListener('pointerdown', handlePointerDown)
+    renderer.domElement.addEventListener('auxclick', preventMiddleClick)
+    window.addEventListener('pointerup', handlePointerRelease)
+    window.addEventListener('pointercancel', handlePointerRelease)
+    window.addEventListener('blur', handlePointerRelease)
+
+    runtimeRef.current = { renderer, scene, camera, controls, transformControls, selectionBox, hemisphere, keyLight, rimLight, ground, resize }
     const resizeObserver = new ResizeObserver(resize)
     resizeObserver.observe(host)
     resize()
     controls.update()
+    const savedScene = readSavedModel3DScene()
+    if (savedScene) restoreSavedSceneRef.current(savedScene)
 
     const renderFrame = () => {
       controls.update()
+      if (selectionBox.visible) selectionBox.update()
       renderer.render(scene, camera)
       animationFrameRef.current = window.requestAnimationFrame(renderFrame)
     }
@@ -236,11 +830,25 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
       loadSequenceRef.current += 1
       window.cancelAnimationFrame(animationFrameRef.current)
       resizeObserver.disconnect()
+      renderer.domElement.removeEventListener('pointerdown', handlePointerDown)
+      renderer.domElement.removeEventListener('auxclick', preventMiddleClick)
+      window.removeEventListener('pointerup', handlePointerRelease)
+      window.removeEventListener('pointercancel', handlePointerRelease)
+      window.removeEventListener('blur', handlePointerRelease)
       controls.removeEventListener('end', updateDistance)
+      transformControls.removeEventListener('dragging-changed', handleDraggingChanged)
+      transformControls.removeEventListener('objectChange', handleObjectChange)
+      transformControls.removeEventListener('mouseDown', handleTransformStart)
+      transformControls.removeEventListener('mouseUp', handleTransformEnd)
       controls.dispose()
-      disposeModel(modelRef.current, modelMaterialRef.current)
-      modelRef.current = null
-      modelMaterialRef.current = null
+      transformControls.detach()
+      transformControls.dispose()
+      allSceneItems.forEach((item) => disposeModel(item.object, item.material))
+      allSceneItems.clear()
+      sceneItemsRef.current = []
+      sceneHistoryRef.current = []
+      selectionBox.geometry.dispose()
+      disposeMaterial(selectionBox.material)
       ground.geometry.dispose()
       groundMaterial.dispose()
       renderer.dispose()
@@ -261,11 +869,27 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
   }, [backgroundColor])
 
   useEffect(() => {
-    const material = modelMaterialRef.current
-    if (!material) return
-    material.color.set(modelColor)
-    material.needsUpdate = true
-  }, [modelColor])
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const item = sceneItemsRef.current.find((candidate) => candidate.id === selectedItemId)
+    if (item) {
+      runtime.transformControls.attach(item.object)
+      runtime.selectionBox.setFromObject(item.object)
+      runtime.selectionBox.visible = true
+      setModelColor(`#${item.material.color.getHexString()}`)
+    } else {
+      runtime.transformControls.detach()
+      runtime.selectionBox.visible = false
+    }
+  }, [selectedItemId, sceneItems])
+
+  useEffect(() => {
+    runtimeRef.current?.transformControls.setMode(transformMode)
+  }, [transformMode])
+
+  useEffect(() => {
+    runtimeRef.current?.transformControls.setSpace(transformSpace)
+  }, [transformSpace])
 
   useEffect(() => {
     const runtime = runtimeRef.current
@@ -277,9 +901,33 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
   useEffect(() => {
     const runtime = runtimeRef.current
     if (!runtime) return
-    runtime.ground.visible = showProjection
+    runtime.ground.visible = showProjection && lightEnabled
     runtime.renderer.shadowMap.needsUpdate = true
-  }, [showProjection])
+  }, [lightEnabled, showProjection])
+
+  useEffect(() => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const intensityScale = lightIntensity / 100
+    runtime.hemisphere.intensity = lightEnabled
+      ? defaultHemisphereIntensity * intensityScale
+      : unlitPreviewHemisphereIntensity
+    runtime.keyLight.intensity = lightEnabled ? defaultKeyLightIntensity * intensityScale : 0
+    runtime.rimLight.intensity = lightEnabled ? defaultRimLightIntensity * intensityScale : 0
+    sceneItemsRef.current.forEach((item) => {
+      const materials = item.parametricBox
+        ? [item.parametricBox.baseMaterial, item.parametricBox.lidMaterial]
+        : [item.material]
+      materials.forEach((material) => {
+        material.emissive.set(0x000000)
+        material.emissiveIntensity = 0
+        material.roughness = lightEnabled ? 0.58 : 0.86
+        material.metalness = lightEnabled ? 0.08 : 0.02
+        material.needsUpdate = true
+      })
+    })
+    runtime.renderer.shadowMap.needsUpdate = true
+  }, [lightEnabled, lightIntensity])
 
   useEffect(() => {
     const runtime = runtimeRef.current
@@ -295,27 +943,389 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault()
+        undoSceneRef.current()
+        return
+      }
+      if (target?.matches('input, textarea, select, [contenteditable="true"]')) return
       if (event.key === 'Escape') onClose()
+      if (event.key.toLowerCase() === 'w') setTransformMode('translate')
+      if (event.key.toLowerCase() === 'r') setTransformMode('rotate')
+      if (event.key === 'Delete' || event.key === 'Backspace') deleteSelectedItemRef.current()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
 
-  function replaceSceneModel(object: THREE.Object3D, nextFileName: string, format: string) {
+  function nextPlacement(index: number) {
+    const column = index % 3
+    const row = Math.floor(index / 3)
+    return new THREE.Vector3((column - 1) * 2.55, 0, row * 2.65)
+  }
+
+  function createModelMaterial(color: string) {
+    return new THREE.MeshStandardMaterial({
+      color,
+      emissive: 0x000000,
+      emissiveIntensity: 0,
+      roughness: lightEnabled ? 0.58 : 0.86,
+      metalness: lightEnabled ? 0.08 : 0.02,
+    })
+  }
+
+  function rebuildParametricPrimitive(item: SceneItem) {
+    const data = item.parametricPrimitive
+    if (!data) return
+    const settings = data.settings
+    const root = item.object as THREE.Group
+    disposeObjectGeometries(root)
+    root.clear()
+    const unit = 0.01
+    const geometry = settings.kind === 'cylinder'
+      ? new THREE.CylinderGeometry(settings.radius * unit, settings.radius * unit, settings.height * unit, 64)
+      : new THREE.BoxGeometry(settings.length * unit, settings.height * unit, settings.width * unit)
+    const mesh = new THREE.Mesh(geometry, item.material)
+    const height = settings.height * unit
+    mesh.position.y = height / 2
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    root.add(mesh)
+    item.material.color.set(settings.color)
+    item.material.needsUpdate = true
+    root.updateMatrixWorld(true)
+    item.stats = collectModelStats(root)
+  }
+
+  function createParametricPrimitive(
+    sourceSettings: ParametricPrimitiveSettings,
+    recordHistory = true,
+  ) {
+    const runtime = runtimeRef.current
+    if (!runtime) return null
+    if (recordHistory) pushSceneHistory()
+    const settings = { ...sourceSettings }
+    const root = new THREE.Group()
+    const id = crypto.randomUUID()
+    const name = settings.kind === 'cylinder' ? '参数化圆柱体' : '参数化方形体'
+    root.name = name
+    root.userData.sceneItemId = id
+    root.position.copy(nextPlacement(sceneItemsRef.current.length))
+    const material = createModelMaterial(settings.color)
+    const item: SceneItem = {
+      id,
+      name,
+      format: '参数模型',
+      object: root,
+      material,
+      stats: { meshes: 0, vertices: 0, triangles: 0 },
+      parametricPrimitive: { settings },
+    }
+    rebuildParametricPrimitive(item)
+    runtime.scene.add(root)
+    allSceneItemsRef.current.add(item)
+    sceneItemsRef.current = [...sceneItemsRef.current, item]
+    syncSceneItems()
+    selectSceneItem(id)
+    window.requestAnimationFrame(() => updateSceneBounds(true))
+    return item
+  }
+
+  function changeParametricPrimitiveSettings(changes: Partial<ParametricPrimitiveSettings>, recordHistory = true) {
+    if (!selectedItem?.parametricPrimitive) return
+    if (recordHistory) pushSceneHistory()
+    const next = { ...selectedItem.parametricPrimitive.settings, ...changes }
+    next.radius = Math.max(10, Math.min(300, next.radius))
+    next.height = Math.max(10, Math.min(600, next.height))
+    next.length = Math.max(10, Math.min(600, next.length))
+    next.width = Math.max(10, Math.min(600, next.width))
+    selectedItem.parametricPrimitive.settings = next
+    rebuildParametricPrimitive(selectedItem)
+    syncSceneItems()
+    updateSceneBounds(false)
+  }
+
+  function rebuildParametricBox(item: SceneItem) {
+    const data = item.parametricBox
+    if (!data) return
+    const root = item.object as THREE.Group
+    const baseGroup = root.getObjectByName('parametric-box-base') as THREE.Group | undefined
+    const lidGroup = root.getObjectByName('parametric-box-lid') as THREE.Group | undefined
+    if (!baseGroup || !lidGroup) return
+
+    disposeObjectGeometries(baseGroup)
+    disposeObjectGeometries(lidGroup)
+    baseGroup.clear()
+    lidGroup.clear()
+
+    const settings = data.settings
+    const unit = 0.01
+    const length = settings.length * unit
+    const width = settings.width * unit
+    const baseHeight = settings.baseHeight * unit
+    const lidHeight = settings.lidHeight * unit
+    const thickness = Math.min(settings.thickness * unit, length * 0.2, width * 0.2, baseHeight * 0.45, lidHeight * 0.45)
+    const gap = settings.gap * unit
+    const lidLength = length + (gap + thickness) * 2
+    const lidWidth = width + (gap + thickness) * 2
+
+    data.baseMaterial.color.set(settings.baseColor)
+    data.lidMaterial.color.set(settings.lidColor)
+    buildOpenBoxGeometry(baseGroup, { length, width, height: baseHeight, thickness }, data.baseMaterial)
+    buildOpenBoxGeometry(lidGroup, { length: lidLength, width: lidWidth, height: lidHeight, thickness, inverted: true }, data.lidMaterial)
+
+    baseGroup.position.set(0, 0, 0)
+    baseGroup.rotation.set(0, 0, 0)
+    lidGroup.position.set(0, 0, 0)
+    lidGroup.rotation.set(0, 0, 0)
+    if (settings.pose === 'closed') {
+      lidGroup.position.y = baseHeight - lidHeight * 0.68
+    } else if (settings.pose === 'open') {
+      lidGroup.position.set(0, baseHeight + 0.45, 0)
+      lidGroup.rotation.z = THREE.MathUtils.degToRad(-8)
+    } else {
+      lidGroup.position.set((length + lidLength) / 2 + 0.45, 0, 0)
+      lidGroup.rotation.set(0, 0, 0)
+    }
+    root.updateMatrixWorld(true)
+    item.stats = collectModelStats(root)
+  }
+
+  function createParametricBox(
+    sourceSettings: ParametricBoxSettings = defaultParametricBoxSettings,
+    recordHistory = true,
+  ) {
+    const runtime = runtimeRef.current
+    if (!runtime) return null
+    if (recordHistory) pushSceneHistory()
+    const settings = { ...sourceSettings }
+    const root = new THREE.Group()
+    const baseGroup = new THREE.Group()
+    const lidGroup = new THREE.Group()
+    baseGroup.name = 'parametric-box-base'
+    lidGroup.name = 'parametric-box-lid'
+    root.add(baseGroup, lidGroup)
+    root.position.copy(nextPlacement(sceneItemsRef.current.length))
+    const id = crypto.randomUUID()
+    root.name = '参数化礼盒'
+    root.userData.sceneItemId = id
+    const baseMaterial = createModelMaterial(settings.baseColor)
+    const lidMaterial = createModelMaterial(settings.lidColor)
+    const item: SceneItem = {
+      id,
+      name: '参数化礼盒',
+      format: '参数模型',
+      object: root,
+      material: baseMaterial,
+      stats: { meshes: 0, vertices: 0, triangles: 0 },
+      parametricBox: { settings, baseMaterial, lidMaterial },
+    }
+    rebuildParametricBox(item)
+    runtime.scene.add(root)
+    allSceneItemsRef.current.add(item)
+    sceneItemsRef.current = [...sceneItemsRef.current, item]
+    syncSceneItems()
+    selectSceneItem(id)
+    window.requestAnimationFrame(() => updateSceneBounds(true))
+    return item
+  }
+
+  function createSavedParametricPart(saved: SavedModel3DItem) {
+    const runtime = runtimeRef.current
+    if (!runtime || !saved.part || !saved.settings) return null
+    const settings = { ...saved.settings }
+    const unit = 0.01
+    const length = settings.length * unit
+    const width = settings.width * unit
+    const baseHeight = settings.baseHeight * unit
+    const lidHeight = settings.lidHeight * unit
+    const thickness = Math.min(settings.thickness * unit, length * 0.2, width * 0.2, baseHeight * 0.45, lidHeight * 0.45)
+    const gap = settings.gap * unit
+    const material = createModelMaterial(saved.part === 'base' ? settings.baseColor : settings.lidColor)
+    const object = new THREE.Group()
+    if (saved.part === 'base') {
+      buildOpenBoxGeometry(object, { length, width, height: baseHeight, thickness }, material)
+    } else {
+      buildOpenBoxGeometry(object, {
+        length: length + (gap + thickness) * 2,
+        width: width + (gap + thickness) * 2,
+        height: lidHeight,
+        thickness,
+        inverted: true,
+      }, material)
+    }
+    const id = crypto.randomUUID()
+    object.name = saved.name
+    object.userData.sceneItemId = id
+    applySavedTransform(object, saved.transform)
+    const item: SceneItem = {
+      id,
+      name: saved.name,
+      format: saved.part === 'base' ? '参数模型 · 盒底' : '参数模型 · 盒盖',
+      object,
+      material,
+      stats: collectModelStats(object),
+      parametricBoxPart: { part: saved.part, settings },
+    }
+    runtime.scene.add(object)
+    allSceneItemsRef.current.add(item)
+    sceneItemsRef.current = [...sceneItemsRef.current, item]
+    return item
+  }
+
+  function restoreSavedScene(saved: SavedModel3DScene) {
+    setViewportId(viewportPresets.some((preset) => preset.id === saved.viewportId) ? saved.viewportId : 'square')
+    setBackgroundColor(saved.backgroundColor || defaultBackgroundColor)
+    setFocalLength(saved.focalLength || 50)
+    setShowProjection(Boolean(saved.showProjection))
+    setLightEnabled(saved.lightEnabled !== false)
+    setLightIntensity(saved.lightIntensity || defaultLightIntensity)
+    setLightAzimuth(Number.isFinite(saved.lightAzimuth) ? saved.lightAzimuth : defaultLightAzimuth)
+    setLightElevation(Number.isFinite(saved.lightElevation) ? saved.lightElevation : defaultLightElevation)
+    const restored: SceneItem[] = []
+    saved.items.forEach((savedItem) => {
+      if (savedItem.kind === 'parametric-box' && savedItem.settings) {
+        const item = createParametricBox(savedItem.settings, false)
+        if (item) {
+          item.name = savedItem.name
+          item.object.name = savedItem.name
+          applySavedTransform(item.object, savedItem.transform)
+          restored.push(item)
+        }
+      } else if (savedItem.kind === 'parametric-part') {
+        const item = createSavedParametricPart(savedItem)
+        if (item) restored.push(item)
+      } else if (savedItem.kind === 'parametric-primitive' && savedItem.primitiveSettings) {
+        const item = createParametricPrimitive(savedItem.primitiveSettings, false)
+        if (item) {
+          item.name = savedItem.name
+          item.object.name = savedItem.name
+          applySavedTransform(item.object, savedItem.transform)
+          restored.push(item)
+        }
+      }
+    })
+    syncSceneItems()
+    selectSceneItem(restored[saved.selectedIndex]?.id || restored.at(-1)?.id || null)
+    savedCameraRef.current = saved.camera
+    window.requestAnimationFrame(() => {
+      const runtime = runtimeRef.current
+      const camera = savedCameraRef.current
+      if (!runtime || !camera) return
+      runtime.camera.position.fromArray(camera.position)
+      runtime.camera.up.fromArray(camera.up)
+      runtime.controls.target.fromArray(camera.target)
+      runtime.camera.setFocalLength(saved.focalLength || 50)
+      runtime.camera.updateProjectionMatrix()
+      runtime.controls.update()
+      setCameraDistance(Number(runtime.controls.getDistance().toFixed(2)))
+      savedCameraRef.current = null
+    })
+  }
+  restoreSavedSceneRef.current = restoreSavedScene
+
+  function changeParametricBoxSettings(changes: Partial<ParametricBoxSettings>, recordHistory = true) {
+    if (!selectedItem?.parametricBox) return
+    if (recordHistory) pushSceneHistory()
+    const current = selectedItem.parametricBox.settings
+    const next = { ...current, ...changes }
+    next.length = Math.max(50, Math.min(600, next.length))
+    next.width = Math.max(50, Math.min(600, next.width))
+    next.baseHeight = Math.max(20, Math.min(300, next.baseHeight))
+    next.lidHeight = Math.max(10, Math.min(150, next.lidHeight))
+    next.thickness = Math.max(1, Math.min(20, next.thickness))
+    next.gap = Math.max(1, Math.min(30, next.gap))
+    selectedItem.parametricBox.settings = next
+    rebuildParametricBox(selectedItem)
+    syncSceneItems()
+    updateSceneBounds(false)
+  }
+
+  function splitParametricBox() {
+    const runtime = runtimeRef.current
+    const item = selectedItem
+    const data = item?.parametricBox
+    if (!runtime || !item || !data) return
+    const baseSource = item.object.getObjectByName('parametric-box-base') as THREE.Group | undefined
+    const lidSource = item.object.getObjectByName('parametric-box-lid') as THREE.Group | undefined
+    if (!baseSource || !lidSource) return
+
+    pushSceneHistory()
+    item.object.updateMatrixWorld(true)
+
+    const createPart = (source: THREE.Group, name: string, color: string, format: string) => {
+      source.updateWorldMatrix(true, true)
+      const object = source.clone(true)
+      const material = createModelMaterial(color)
+      object.traverse((child) => {
+        const mesh = child as THREE.Mesh
+        if (!mesh.isMesh) return
+        mesh.geometry = mesh.geometry.clone()
+        mesh.material = material
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+      })
+      object.matrix.copy(source.matrixWorld)
+      object.matrix.decompose(object.position, object.quaternion, object.scale)
+      object.matrixAutoUpdate = true
+      const id = crypto.randomUUID()
+      object.name = name
+      object.userData.sceneItemId = id
+      object.updateMatrixWorld(true)
+      const part: SceneItem = {
+        id,
+        name,
+        format,
+        object,
+        material,
+        stats: collectModelStats(object),
+        parametricBoxPart: {
+          part: name.includes('盒盖') ? 'lid' : 'base',
+          settings: { ...data.settings },
+        },
+      }
+      allSceneItemsRef.current.add(part)
+      return part
+    }
+
+    const basePart = createPart(baseSource, '参数礼盒 · 盒底', data.settings.baseColor, '参数模型 · 盒底')
+    const lidPart = createPart(lidSource, '参数礼盒 · 盒盖', data.settings.lidColor, '参数模型 · 盒盖')
+    const sourceIndex = sceneItemsRef.current.indexOf(item)
+    const nextItems = sceneItemsRef.current.filter((candidate) => candidate !== item)
+    nextItems.splice(Math.max(0, sourceIndex), 0, basePart, lidPart)
+
+    runtime.transformControls.detach()
+    runtime.selectionBox.visible = false
+    runtime.scene.remove(item.object)
+    runtime.scene.add(basePart.object, lidPart.object)
+    sceneItemsRef.current = nextItems
+    syncSceneItems()
+    selectSceneItem(basePart.id)
+    updateSceneBounds(false)
+  }
+
+  function beginParameterEdit() {
+    if (!parameterEditSnapshotRef.current) parameterEditSnapshotRef.current = captureSceneSnapshot()
+  }
+
+  function endParameterEdit() {
+    const snapshot = parameterEditSnapshotRef.current
+    parameterEditSnapshotRef.current = null
+    if (snapshot && sceneSnapshotSignature(snapshot) !== sceneSnapshotSignature(captureSceneSnapshot())) pushSceneHistory(snapshot)
+  }
+
+  function addSceneObject(
+    object: THREE.Object3D,
+    name: string,
+    format: string,
+    color = defaultModelColor,
+    recordHistory = true,
+  ) {
     const runtime = runtimeRef.current
     if (!runtime) throw new Error('3D 预览器尚未准备好')
 
-    if (modelRef.current) {
-      runtime.scene.remove(modelRef.current)
-      disposeModel(modelRef.current, modelMaterialRef.current)
-    }
-
-    const material = new THREE.MeshStandardMaterial({
-      color: modelColor,
-      roughness: 0.58,
-      metalness: 0.08,
-    })
-
+    const material = createModelMaterial(color)
     object.traverse((child) => {
       const mesh = child as THREE.Mesh
       if (!mesh.isMesh) return
@@ -335,57 +1345,36 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
       disposeModel(object, material)
       throw new Error('模型中没有可显示的几何体')
     }
+    if (recordHistory) pushSceneHistory()
 
-    object.scale.multiplyScalar(3.2 / maximumDimension)
+    object.scale.multiplyScalar(2.35 / maximumDimension)
     object.updateMatrixWorld(true)
     const scaledBox = new THREE.Box3().setFromObject(object)
     const center = scaledBox.getCenter(new THREE.Vector3())
-    object.position.sub(center)
+    object.position.set(-center.x, -scaledBox.min.y, -center.z)
+    object.position.add(nextPlacement(sceneItemsRef.current.length))
+    const id = crypto.randomUUID()
+    object.userData.sceneItemId = id
+    object.name = name
     object.updateMatrixWorld(true)
 
-    const finalBox = new THREE.Box3().setFromObject(object)
-    const sphere = finalBox.getBoundingSphere(new THREE.Sphere())
-    const radius = Math.max(sphere.radius, 0.5)
-    const halfFov = THREE.MathUtils.degToRad(runtime.camera.fov * 0.5)
-    const distance = (radius / Math.sin(halfFov)) * 1.28
-    const direction = new THREE.Vector3(1, 0.62, 1).normalize()
-
+    const item: SceneItem = { id, name, format, object, material, stats: collectModelStats(object) }
+    allSceneItemsRef.current.add(item)
     runtime.scene.add(object)
-    modelRef.current = object
-    modelMaterialRef.current = material
-    runtime.controls.target.copy(sphere.center)
-    runtime.camera.position.copy(sphere.center).addScaledVector(direction, distance)
-    runtime.camera.near = Math.max(0.01, distance / 1000)
-    runtime.camera.far = Math.max(100, distance * 100)
-    runtime.camera.updateProjectionMatrix()
-    runtime.controls.minDistance = Math.max(0.15, radius * 0.22)
-    runtime.controls.maxDistance = Math.max(30, radius * 24)
-    runtime.controls.update()
-    runtime.controls.saveState()
-    runtime.ground.position.y = finalBox.min.y - 0.02
-    const shadowExtent = Math.max(6, radius * 4.2)
-    runtime.keyLight.shadow.camera.left = -shadowExtent
-    runtime.keyLight.shadow.camera.right = shadowExtent
-    runtime.keyLight.shadow.camera.top = shadowExtent
-    runtime.keyLight.shadow.camera.bottom = -shadowExtent
-    runtime.keyLight.shadow.camera.updateProjectionMatrix()
-    setDirectionalLightPosition(runtime.keyLight, runtime.controls.target, lightAzimuth, lightElevation)
-    runtime.renderer.shadowMap.needsUpdate = true
-
-    setCameraDistance(Number(runtime.controls.getDistance().toFixed(2)))
-    setFileName(nextFileName)
-    setModelFormat(format.toUpperCase())
-    setModelStats(collectModelStats(object))
+    sceneItemsRef.current = [...sceneItemsRef.current, item]
+    syncSceneItems()
+    selectSceneItem(id)
+    return item
   }
 
-  async function loadModelFile(file: File) {
-    const extension = modelFileExtension(file.name)
-    if (extension !== 'obj' && extension !== 'fbx') {
+  async function loadModelFiles(files: File[]) {
+    const supportedFiles = files.filter((file) => ['obj', 'fbx'].includes(modelFileExtension(file.name)))
+    if (!supportedFiles.length) {
       setError('仅支持 OBJ 或 FBX 格式文件')
       return
     }
-    if (file.size > maximumModelFileSize) {
-      setError('模型文件不能超过 100 MB')
+    if (supportedFiles.some((file) => file.size > maximumModelFileSize)) {
+      setError('单个模型文件不能超过 100 MB')
       return
     }
 
@@ -393,28 +1382,30 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     loadSequenceRef.current = sequence
     setLoading(true)
     setError('')
-
     try {
-      let object: THREE.Object3D
-      if (extension === 'obj') {
-        const [{ OBJLoader }, content] = await Promise.all([
-          import('three/addons/loaders/OBJLoader.js'),
-          file.text(),
-        ])
-        object = new OBJLoader().parse(content)
-      } else {
-        const [{ FBXLoader }, buffer] = await Promise.all([
-          import('three/addons/loaders/FBXLoader.js'),
-          file.arrayBuffer(),
-        ])
-        object = new FBXLoader().parse(buffer, '')
+      for (const file of supportedFiles) {
+        const extension = modelFileExtension(file.name)
+        let object: THREE.Object3D
+        if (extension === 'obj') {
+          const [{ OBJLoader }, content] = await Promise.all([
+            import('three/addons/loaders/OBJLoader.js'),
+            file.text(),
+          ])
+          object = new OBJLoader().parse(content)
+        } else {
+          const [{ FBXLoader }, buffer] = await Promise.all([
+            import('three/addons/loaders/FBXLoader.js'),
+            file.arrayBuffer(),
+          ])
+          object = new FBXLoader().parse(buffer, '')
+        }
+        if (sequence !== loadSequenceRef.current) {
+          disposeModel(object, null)
+          return
+        }
+        addSceneObject(object, file.name, extension.toUpperCase())
       }
-
-      if (sequence !== loadSequenceRef.current) {
-        disposeModel(object, null)
-        return
-      }
-      replaceSceneModel(object, file.name, extension)
+      window.requestAnimationFrame(() => updateSceneBounds(true))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '模型解析失败，请检查文件是否完整')
     } finally {
@@ -423,15 +1414,91 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]
+    const files = Array.from(event.target.files || [])
     event.target.value = ''
-    if (file) void loadModelFile(file)
+    if (files.length) void loadModelFiles(files)
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
-    const file = event.dataTransfer.files?.[0]
-    if (file) void loadModelFile(file)
+    setDraggingOverViewport(false)
+    const files = Array.from(event.dataTransfer.files || [])
+    if (files.length) {
+      void loadModelFiles(files)
+      return
+    }
+  }
+
+  function duplicateSelectedItem() {
+    if (!selectedItem) return
+    pushSceneHistory()
+    if (selectedItem.parametricBox) {
+      const copy = createParametricBox(selectedItem.parametricBox.settings, false)
+      if (!copy) return
+      copy.object.position.copy(selectedItem.object.position).add(new THREE.Vector3(0.45, 0, 0.45))
+      copy.object.quaternion.copy(selectedItem.object.quaternion)
+      copy.object.scale.copy(selectedItem.object.scale)
+      syncSceneItems()
+      updateSceneBounds(false)
+      return
+    }
+    if (selectedItem.parametricPrimitive) {
+      const copy = createParametricPrimitive(selectedItem.parametricPrimitive.settings, false)
+      if (!copy) return
+      copy.object.position.copy(selectedItem.object.position).add(new THREE.Vector3(0.45, 0, 0.45))
+      copy.object.quaternion.copy(selectedItem.object.quaternion)
+      copy.object.scale.copy(selectedItem.object.scale)
+      syncSceneItems()
+      updateSceneBounds(false)
+      return
+    }
+    const clone = selectedItem.object.clone(true)
+    clone.traverse((child) => {
+      const mesh = child as THREE.Mesh
+      if (!mesh.isMesh) return
+      mesh.geometry = mesh.geometry.clone()
+      mesh.material = new THREE.MeshBasicMaterial()
+    })
+    const copy = addSceneObject(clone, `${selectedItem.name} 副本`, selectedItem.format, `#${selectedItem.material.color.getHexString()}`, false)
+    copy.object.position.copy(selectedItem.object.position).add(new THREE.Vector3(0.45, 0, 0.45))
+    copy.object.rotation.copy(selectedItem.object.rotation)
+    syncSceneItems()
+    updateSceneBounds(false)
+  }
+
+  function changeSelectedColor(color: string) {
+    setModelColor(color)
+    if (!selectedItem) return
+    if (selectedItem.parametricBox) {
+      changeParametricBoxSettings({ baseColor: color })
+      return
+    }
+    if (selectedItem.parametricPrimitive) {
+      changeParametricPrimitiveSettings({ color })
+      return
+    }
+    if (`#${selectedItem.material.color.getHexString()}`.toLowerCase() !== color.toLowerCase()) pushSceneHistory()
+    selectedItem.material.color.set(color)
+    if (selectedItem.parametricBoxPart) {
+      if (selectedItem.parametricBoxPart.part === 'base') selectedItem.parametricBoxPart.settings.baseColor = color
+      else selectedItem.parametricBoxPart.settings.lidColor = color
+    }
+    selectedItem.material.needsUpdate = true
+  }
+
+  function changeSelectedTransform(kind: 'position' | 'rotation', axis: 'x' | 'y' | 'z', value: number) {
+    if (!selectedItem || !Number.isFinite(value)) return
+    const currentValue = kind === 'rotation'
+      ? THREE.MathUtils.radToDeg(selectedItem.object.rotation[axis])
+      : selectedItem.object.position[axis]
+    if (Math.abs(currentValue - value) < 0.0001) return
+    pushSceneHistory()
+    if (kind === 'rotation') selectedItem.object.rotation[axis] = THREE.MathUtils.degToRad(value)
+    else selectedItem.object.position[axis] = value
+    selectedItem.object.updateMatrixWorld(true)
+    runtimeRef.current?.selectionBox.update()
+    syncSceneItems()
+    updateSceneBounds(false)
   }
 
   function changeCameraDistance(nextValue: number) {
@@ -446,14 +1513,13 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
 
   function setCameraView(view: 'front' | 'side' | 'top') {
     const runtime = runtimeRef.current
-    if (!runtime || !modelRef.current) return
+    if (!runtime || !hasModel) return
     const distance = runtime.controls.getDistance()
-    const direction =
-      view === 'front'
-        ? new THREE.Vector3(0, 0, 1)
-        : view === 'side'
-          ? new THREE.Vector3(1, 0, 0)
-          : new THREE.Vector3(0, 1, 0.001).normalize()
+    const direction = view === 'front'
+      ? new THREE.Vector3(0, 0, 1)
+      : view === 'side'
+        ? new THREE.Vector3(1, 0, 0)
+        : new THREE.Vector3(0, 1, 0.001).normalize()
     runtime.camera.position.copy(runtime.controls.target).addScaledVector(direction, distance)
     runtime.camera.up.set(0, view === 'top' ? 0 : 1, view === 'top' ? -1 : 0)
     runtime.controls.update()
@@ -462,19 +1528,17 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
 
   function resetCameraView() {
     const runtime = runtimeRef.current
-    if (!runtime || !modelRef.current) return
+    if (!runtime || !hasModel) return
     runtime.camera.up.set(0, 1, 0)
-    runtime.controls.reset()
+    updateSceneBounds(true)
     runtime.camera.setFocalLength(focalLength)
     runtime.camera.updateProjectionMatrix()
-    runtime.controls.update()
-    setCameraDistance(Number(runtime.controls.getDistance().toFixed(2)))
   }
 
   function exportCurrentView() {
     const runtime = runtimeRef.current
-    if (!runtime || !modelRef.current || exporting) {
-      if (!modelRef.current) setError('请先导入一个 OBJ 或 FBX 模型')
+    if (!runtime || !hasModel || exporting) {
+      if (!hasModel) setError('请先加入至少一个 3D 模型')
       return
     }
 
@@ -483,6 +1547,10 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     try {
       const previousPixelRatio = runtime.renderer.getPixelRatio()
       const previousSize = runtime.renderer.getSize(new THREE.Vector2())
+      const selectionWasVisible = runtime.selectionBox.visible
+      const gizmoWasVisible = runtime.transformControls.getHelper().visible
+      runtime.selectionBox.visible = false
+      runtime.transformControls.getHelper().visible = false
       runtime.renderer.setPixelRatio(1)
       runtime.renderer.setSize(viewport.width, viewport.height, false)
       runtime.camera.aspect = viewport.width / viewport.height
@@ -495,13 +1563,14 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
       runtime.renderer.setSize(previousSize.x, previousSize.y, false)
       runtime.camera.aspect = previousSize.x / previousSize.y
       runtime.camera.updateProjectionMatrix()
+      runtime.selectionBox.visible = selectionWasVisible
+      runtime.transformControls.getHelper().visible = gizmoWasVisible
       runtime.controls.update()
 
-      const baseName = fileName.replace(/\.(obj|fbx)$/i, '') || '3d-model'
       setExporting(false)
       onExport({
         dataUrl,
-        fileName: `${baseName}-3D视角-${viewport.width}x${viewport.height}.png`,
+        fileName: `礼盒3D构图-${viewport.width}x${viewport.height}.png`,
         width: viewport.width,
         height: viewport.height,
       })
@@ -511,12 +1580,11 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     }
   }
 
-  const viewportStyle = {
-    '--model3d-aspect': String(viewport.width / viewport.height),
-  } as CSSProperties
-  const lightDirectionStyle = {
-    '--model3d-light-angle': `${lightAzimuth - 90}deg`,
-  } as CSSProperties
+  const viewportStyle = { '--model3d-aspect': String(viewport.width / viewport.height) } as CSSProperties
+  const lightDirectionStyle = { '--model3d-light-angle': `${lightAzimuth - 90}deg` } as CSSProperties
+  const selectedPosition = selectedItem?.object.position
+  const selectedRotation = selectedItem?.object.rotation
+  void transformRevision
 
   return (
     <div
@@ -532,12 +1600,22 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
             <Box size={19} />
             <div>
               <h2>3D 模型预览</h2>
-              <p>导入 OBJ 或 FBX，调整视角后输出为画板参考图</p>
+              <p>创建参数化礼盒或导入本地模型，调整位置与构图后输出为画板参考图</p>
             </div>
           </div>
-          <button className="model3d-icon-button" type="button" onClick={onClose} title="关闭 3D 预览">
-            <X size={18} />
-          </button>
+          <div className="model3d-head-actions">
+            <button className="model3d-reset-button" type="button" onClick={resetSceneAndSavedData} title="清空当前场景和本地保存">
+              <RefreshCw size={14} />
+              重置
+            </button>
+            <button className={`model3d-save-button ${saveStatus}`} type="button" onClick={saveSceneLocally}>
+              <Save size={15} />
+              {saveStatus === 'saved' ? '已保存' : saveStatus === 'error' ? '保存失败' : '保存场景'}
+            </button>
+            <button className="model3d-icon-button" type="button" onClick={onClose} title="关闭 3D 预览">
+              <X size={18} />
+            </button>
+          </div>
         </header>
 
         <div className="model3d-body">
@@ -545,43 +1623,80 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
             <div className="model3d-filebar">
               <button type="button" className="model3d-file-button" onClick={() => fileInputRef.current?.click()}>
                 <Upload size={15} />
-                {fileName ? '更换模型' : '选择模型'}
+                导入本地模型
               </button>
-              <input ref={fileInputRef} type="file" accept=".obj,.fbx" hidden onChange={handleFileChange} />
+              <input ref={fileInputRef} type="file" accept=".obj,.fbx" multiple hidden onChange={handleFileChange} />
               <div className="model3d-file-summary">
-                {fileName ? (
+                {hasModel ? (
                   <>
-                    <strong title={fileName}>{fileName}</strong>
-                    <span>{modelFormat} · {modelStats ? `${formatCount(modelStats.triangles)} 三角面` : '正在读取'}</span>
+                    <strong>{sceneItems.length} 个模型正在构图</strong>
+                    <span>{formatCount(totalStats.triangles)} 三角面 · 可继续拖入或导入模型</span>
                   </>
                 ) : (
-                  <span>支持 OBJ、FBX，单个文件最大 100 MB</span>
+                  <span>可创建参数化礼盒，也支持批量导入 OBJ、FBX，单文件最大 100 MB</span>
                 )}
               </div>
-              {modelStats && (
+              {hasModel && (
                 <div className="model3d-stats" aria-label="模型统计">
-                  <span>{modelStats.meshes} 网格</span>
-                  <span>{formatCount(modelStats.vertices)} 顶点</span>
+                  <span>{totalStats.meshes} 网格</span>
+                  <span>{formatCount(totalStats.vertices)} 顶点</span>
                 </div>
               )}
             </div>
 
+            <section className="model3d-library" aria-label="礼盒模型库">
+              <div className="model3d-library-head">
+                <div>
+                  <strong>参数模型</strong>
+                  <span>创建可继续调整尺寸、颜色和构图的基础模型</span>
+                </div>
+              </div>
+              <div className="model3d-parametric-create-list">
+                <button className="model3d-parametric-create" type="button" onClick={() => createParametricBox()}>
+                  <span className="model3d-model-glyph parametric" style={{ '--model-card-color': '#8FD9EF' } as CSSProperties}>
+                    <Box size={22} />
+                  </span>
+                  <span><strong>参数化礼盒</strong><small>调整尺寸、壁厚与盒盖状态</small></span>
+                  <Plus size={14} />
+                </button>
+                <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(defaultCylinderSettings)}>
+                  <span className="model3d-model-glyph cylinder" style={{ '--model-card-color': '#AFC9D8' } as CSSProperties} aria-hidden="true" />
+                  <span><strong>圆柱模型</strong><small>调整半径和高度</small></span>
+                  <Plus size={14} />
+                </button>
+                <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(defaultCuboidSettings)}>
+                  <span className="model3d-model-glyph cuboid" style={{ '--model-card-color': '#C9B9A9' } as CSSProperties}>
+                    <Box size={21} />
+                  </span>
+                  <span><strong>方形模型</strong><small>调整长度、宽度和高度</small></span>
+                  <Plus size={14} />
+                </button>
+              </div>
+            </section>
+
             <div className="model3d-viewport-frame">
               <div
-                className="model3d-viewport"
+                className={`model3d-viewport ${draggingOverViewport ? 'drag-active' : ''}`}
                 style={viewportStyle}
-                onDragOver={(event) => event.preventDefault()}
+                onDragEnter={() => setDraggingOverViewport(true)}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingOverViewport(false)
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  event.dataTransfer.dropEffect = 'copy'
+                }}
                 onDrop={handleDrop}
               >
                 <div ref={viewportHostRef} className="model3d-viewport-host" />
-                {!fileName && !loading && (
+                {!hasModel && !loading && (
                   <div className="model3d-empty-state">
-                    <Box size={40} />
-                    <strong>导入 3D 模型开始预览</strong>
-                    <p>拖放 OBJ 或 FBX 到这里，也可以从本地选择文件</p>
+                    <Layers3 size={40} />
+                    <strong>创建或导入 3D 模型</strong>
+                    <p>使用上方参数化礼盒，也可以从本地批量导入 OBJ 或 FBX</p>
                     <button type="button" onClick={() => fileInputRef.current?.click()}>
                       <Upload size={15} />
-                      选择模型
+                      选择本地模型
                     </button>
                   </div>
                 )}
@@ -589,9 +1704,13 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
                   <div className="model3d-loading-state" role="status">
                     <Loader2 size={26} />
                     <strong>正在解析模型</strong>
-                    <span>大文件可能需要一些时间</span>
+                    <span>多个模型会依次加入当前构图</span>
                   </div>
                 )}
+                <div className="model3d-viewport-hint">
+                  <span>{transformMode === 'translate' ? '移动模式 W' : '旋转模式 R'} · {transformSpace === 'world' ? '世界坐标' : '物体坐标'}</span>
+                  <span>中键平移视角 · Ctrl+Z 撤销</span>
+                </div>
                 <div className="model3d-viewport-label">
                   {viewport.label} · {viewport.width} × {viewport.height}
                 </div>
@@ -601,6 +1720,208 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
 
           <aside className="model3d-inspector" aria-label="3D 预览参数">
             <section className="model3d-control-section">
+              <div className="model3d-section-title model3d-section-title-spread">
+                <span><Layers3 size={15} /><strong>场景对象</strong></span>
+                <small>{sceneItems.length} 个</small>
+              </div>
+              {sceneItems.length ? (
+                <div className="model3d-scene-list">
+                  {sceneItems.map((item) => (
+                    <div className={`model3d-scene-item ${item.id === selectedItemId ? 'selected' : ''}`} key={item.id}>
+                      <button type="button" onClick={() => selectSceneItem(item.id)} title={`选择 ${item.name}`}>
+                        <Box size={13} />
+                        <span>{item.name}</span>
+                      </button>
+                      <button type="button" onClick={() => deleteSceneItem(item.id)} title={`删除 ${item.name}`}>
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="model3d-scene-empty">从左侧模型库拖入组件开始构图</div>
+              )}
+
+              <div className="model3d-transform-toolbar" aria-label="模型变换工具">
+                <button className={transformMode === 'translate' ? 'active' : ''} type="button" onClick={() => setTransformMode('translate')} disabled={!selectedItem}>
+                  <Move3D size={13} /> 移动
+                </button>
+                <button className={transformMode === 'rotate' ? 'active' : ''} type="button" onClick={() => setTransformMode('rotate')} disabled={!selectedItem}>
+                  <RotateCw size={13} /> 旋转
+                </button>
+                <button type="button" onClick={duplicateSelectedItem} disabled={!selectedItem} title="复制当前模型">
+                  <Copy size={13} />
+                </button>
+                <button type="button" onClick={() => updateSceneBounds(true)} disabled={!hasModel} title="查看全部模型">
+                  <Focus size={13} />
+                </button>
+              </div>
+
+              <div className="model3d-coordinate-space">
+                <span>坐标方向</span>
+                <div role="group" aria-label="变换坐标方向">
+                  <button
+                    className={transformSpace === 'world' ? 'active' : ''}
+                    type="button"
+                    aria-pressed={transformSpace === 'world'}
+                    onClick={() => setTransformSpace('world')}
+                    disabled={!selectedItem}
+                  >
+                    世界坐标
+                  </button>
+                  <button
+                    className={transformSpace === 'local' ? 'active' : ''}
+                    type="button"
+                    aria-pressed={transformSpace === 'local'}
+                    onClick={() => setTransformSpace('local')}
+                    disabled={!selectedItem}
+                  >
+                    物体坐标
+                  </button>
+                </div>
+                <small>{transformSpace === 'world' ? '变换轴始终沿场景方向' : '变换轴会跟随模型旋转方向'}</small>
+              </div>
+
+              {selectedItem && selectedPosition && selectedRotation && (
+                <div className="model3d-transform-panel">
+                  <div className="model3d-transform-group">
+                    <span>位置</span>
+                    <div>
+                      {(['x', 'y', 'z'] as const).map((axis) => (
+                        <label key={`position-${axis}`}>
+                          <i>{axis.toUpperCase()}</i>
+                          <input
+                            aria-label={`位置 ${axis.toUpperCase()}`}
+                            type="number"
+                            step="0.1"
+                            value={transformValue(selectedPosition[axis])}
+                            onChange={(event) => changeSelectedTransform('position', axis, Number(event.target.value))}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="model3d-transform-group">
+                    <span>旋转</span>
+                    <div>
+                      {(['x', 'y', 'z'] as const).map((axis) => (
+                        <label key={`rotation-${axis}`}>
+                          <i>{axis.toUpperCase()}</i>
+                          <input
+                            aria-label={`旋转 ${axis.toUpperCase()}`}
+                            type="number"
+                            step="1"
+                            value={transformValue(THREE.MathUtils.radToDeg(selectedRotation[axis]))}
+                            onChange={(event) => changeSelectedTransform('rotation', axis, Number(event.target.value))}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {selectedItem?.parametricBox && (
+                <div className="model3d-parametric-panel">
+                  <div className="model3d-parametric-head">
+                    <span><Box size={13} /> 礼盒参数</span>
+                    <small>单位 mm</small>
+                  </div>
+                  <div className="model3d-parametric-grid">
+                    {([
+                      ['length', '长度', 50, 600, 5],
+                      ['width', '宽度', 50, 600, 5],
+                      ['baseHeight', '盒底高度', 20, 300, 5],
+                      ['lidHeight', '盒盖高度', 10, 150, 5],
+                      ['thickness', '材料厚度', 1, 20, 1],
+                      ['gap', '盒盖间隙', 1, 30, 1],
+                    ] as const).map(([key, label, min, max, step]) => (
+                      <label key={key}>
+                        <span>{label}</span>
+                        <input
+                          type="number"
+                          min={min}
+                          max={max}
+                          step={step}
+                          value={selectedItem.parametricBox!.settings[key]}
+                          onFocus={beginParameterEdit}
+                          onBlur={endParameterEdit}
+                          onChange={(event) => changeParametricBoxSettings({ [key]: Number(event.target.value) }, false)}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <div className="model3d-pose-options" role="group" aria-label="盒盖状态">
+                    {([
+                      ['closed', '盖合'],
+                      ['open', '打开'],
+                      ['separated', '分离'],
+                    ] as const).map(([pose, label]) => (
+                      <button
+                        className={selectedItem.parametricBox!.settings.pose === pose ? 'active' : ''}
+                        type="button"
+                        onClick={() => changeParametricBoxSettings({ pose })}
+                        key={pose}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="model3d-parametric-colors">
+                    <label>
+                      <span>盒底颜色</span>
+                      <input type="color" value={selectedItem.parametricBox.settings.baseColor} onChange={(event) => changeParametricBoxSettings({ baseColor: event.target.value })} />
+                    </label>
+                    <label>
+                      <span>盒盖颜色</span>
+                      <input type="color" value={selectedItem.parametricBox.settings.lidColor} onChange={(event) => changeParametricBoxSettings({ lidColor: event.target.value })} />
+                    </label>
+                  </div>
+                  <button className="model3d-parametric-split" type="button" onClick={splitParametricBox}>
+                    <Layers3 size={13} />
+                    拆分盒底与盒盖
+                  </button>
+                  <small className="model3d-parametric-note">拆分后可分别移动、旋转和改色；Ctrl+Z 可恢复参数礼盒。</small>
+                </div>
+              )}
+
+              {selectedItem?.parametricPrimitive && (
+                <div className="model3d-parametric-panel">
+                  <div className="model3d-parametric-head">
+                    <span><Box size={13} /> {selectedItem.parametricPrimitive.settings.kind === 'cylinder' ? '圆柱参数' : '方形参数'}</span>
+                    <small>单位 mm</small>
+                  </div>
+                  <div className="model3d-parametric-grid">
+                    {(selectedItem.parametricPrimitive.settings.kind === 'cylinder'
+                      ? ([['radius', '半径', 10, 300, 5], ['height', '高度', 10, 600, 5]] as const)
+                      : ([['length', '长度', 10, 600, 5], ['width', '宽度', 10, 600, 5], ['height', '高度', 10, 600, 5]] as const)
+                    ).map(([key, label, min, max, step]) => (
+                      <label key={key}>
+                        <span>{label}</span>
+                        <input
+                          type="number"
+                          min={min}
+                          max={max}
+                          step={step}
+                          value={selectedItem.parametricPrimitive!.settings[key]}
+                          onFocus={beginParameterEdit}
+                          onBlur={endParameterEdit}
+                          onChange={(event) => changeParametricPrimitiveSettings({ [key]: Number(event.target.value) }, false)}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <div className="model3d-parametric-colors single">
+                    <label>
+                      <span>模型颜色</span>
+                      <input type="color" value={selectedItem.parametricPrimitive.settings.color} onChange={(event) => changeParametricPrimitiveSettings({ color: event.target.value })} />
+                    </label>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <section className="model3d-control-section">
               <div className="model3d-section-title">
                 <Camera size={15} />
                 <strong>相机</strong>
@@ -608,63 +1929,29 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
               <label className="model3d-field">
                 <span>焦距</span>
                 <div className="model3d-range-row">
-                  <input
-                    type="range"
-                    min="18"
-                    max="120"
-                    step="1"
-                    value={focalLength}
-                    onChange={(event) => setFocalLength(Number(event.target.value))}
-                    disabled={!hasModel}
-                  />
+                  <input type="range" min="18" max="120" step="1" value={focalLength} onChange={(event) => setFocalLength(Number(event.target.value))} disabled={!hasModel} />
                   <div className="model3d-unit-input">
-                    <input
-                      type="number"
-                      min="18"
-                      max="120"
-                      value={focalLength}
-                      onChange={(event) => setFocalLength(Math.max(18, Math.min(120, Number(event.target.value) || 18)))}
-                      disabled={!hasModel}
-                    />
+                    <input type="number" min="18" max="120" value={focalLength} onChange={(event) => setFocalLength(Math.max(18, Math.min(120, Number(event.target.value) || 18)))} disabled={!hasModel} />
                     <span>mm</span>
                   </div>
                 </div>
                 <small>广角 18 mm，标准 50 mm，长焦 120 mm</small>
               </label>
-
               <label className="model3d-field">
                 <span>相机距离</span>
                 <div className="model3d-range-row">
-                  <input
-                    type="range"
-                    min="0.2"
-                    max="30"
-                    step="0.1"
-                    value={cameraDistance}
-                    onChange={(event) => changeCameraDistance(Number(event.target.value))}
-                    disabled={!hasModel}
-                  />
+                  <input type="range" min="0.2" max="30" step="0.1" value={cameraDistance} onChange={(event) => changeCameraDistance(Number(event.target.value))} disabled={!hasModel} />
                   <div className="model3d-unit-input compact">
-                    <input
-                      type="number"
-                      min="0.2"
-                      max="30"
-                      step="0.1"
-                      value={cameraDistance}
-                      onChange={(event) => changeCameraDistance(Number(event.target.value))}
-                      disabled={!hasModel}
-                    />
+                    <input type="number" min="0.2" max="30" step="0.1" value={cameraDistance} onChange={(event) => changeCameraDistance(Number(event.target.value))} disabled={!hasModel} />
                   </div>
                 </div>
               </label>
-
               <div className="model3d-view-buttons" aria-label="相机预设视角">
                 <button type="button" onClick={() => setCameraView('front')} disabled={!hasModel}>正视</button>
                 <button type="button" onClick={() => setCameraView('side')} disabled={!hasModel}>侧视</button>
                 <button type="button" onClick={() => setCameraView('top')} disabled={!hasModel}>俯视</button>
-                <button type="button" onClick={resetCameraView} disabled={!hasModel} title="恢复初始视角">
-                  <RefreshCw size={13} />
-                  重置
+                <button type="button" onClick={resetCameraView} disabled={!hasModel} title="查看全部模型">
+                  <RefreshCw size={13} /> 重置
                 </button>
               </div>
             </section>
@@ -675,11 +1962,11 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
                 <strong>外观</strong>
               </div>
               <label className="model3d-color-field">
-                <span>模型颜色</span>
+                <span>选中模型颜色</span>
                 <div>
-                  <input type="color" value={modelColor} onChange={(event) => setModelColor(event.target.value)} />
-                  <input type="text" value={modelColor.toUpperCase()} onChange={(event) => {
-                    if (/^#[0-9a-f]{6}$/i.test(event.target.value)) setModelColor(event.target.value)
+                  <input type="color" value={modelColor} onChange={(event) => changeSelectedColor(event.target.value)} disabled={!selectedItem} />
+                  <input type="text" value={modelColor.toUpperCase()} disabled={!selectedItem} onChange={(event) => {
+                    if (/^#[0-9a-f]{6}$/i.test(event.target.value)) changeSelectedColor(event.target.value)
                   }} />
                 </div>
               </label>
@@ -700,24 +1987,47 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
                 <strong>光照与投影</strong>
               </div>
               <label className="model3d-projection-toggle">
-                <span>
-                  <strong>显示投影</strong>
-                  <small>开启后在模型底部显示实时投影</small>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={showProjection}
-                  onChange={(event) => setShowProjection(event.target.checked)}
-                />
+                <span><strong>开启灯光</strong><small>{lightEnabled ? '场景灯光已开启' : '保留柔和明暗结构，不产生投影'}</small></span>
+                <input type="checkbox" checked={lightEnabled} onChange={(event) => setLightEnabled(event.target.checked)} />
                 <i aria-hidden="true" />
               </label>
-
+              <label className="model3d-field">
+                <span>灯光强度</span>
+                <div className="model3d-range-row">
+                  <input
+                    aria-label="灯光强度"
+                    type="range"
+                    min="10"
+                    max="200"
+                    step="5"
+                    value={lightIntensity}
+                    onChange={(event) => setLightIntensity(Number(event.target.value))}
+                    disabled={!lightEnabled}
+                  />
+                  <div className="model3d-unit-input compact">
+                    <input
+                      aria-label="灯光强度数值"
+                      type="number"
+                      min="10"
+                      max="200"
+                      step="5"
+                      value={lightIntensity}
+                      onChange={(event) => setLightIntensity(Math.max(10, Math.min(200, Number(event.target.value) || 10)))}
+                      disabled={!lightEnabled}
+                    />
+                    <span>%</span>
+                  </div>
+                </div>
+                <small>100% 为默认亮度，可在 10%–200% 之间调整。</small>
+              </label>
+              <label className="model3d-projection-toggle">
+                <span><strong>显示投影</strong><small>{lightEnabled ? '开启后在模型底部显示实时投影' : '纯色预览下不显示投影'}</small></span>
+                <input type="checkbox" checked={showProjection} onChange={(event) => setShowProjection(event.target.checked)} disabled={!lightEnabled} />
+                <i aria-hidden="true" />
+              </label>
               <div className="model3d-light-direction-summary">
                 <div className="model3d-light-direction-dial" style={lightDirectionStyle} aria-hidden="true">
-                  <span className="model3d-light-direction-arm">
-                    <Sun size={13} />
-                  </span>
-                  <i />
+                  <span className="model3d-light-direction-arm"><Sun size={13} /></span><i />
                 </div>
                 <div>
                   <span><MoveUpRight size={13} /> 光照方向</span>
@@ -725,55 +2035,21 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
                   <small>水平角 / 高度</small>
                 </div>
               </div>
-
               <label className="model3d-field">
                 <span>水平角</span>
                 <div className="model3d-range-row">
-                  <input
-                    aria-label="光照水平角"
-                    type="range"
-                    min="-180"
-                    max="180"
-                    step="1"
-                    value={lightAzimuth}
-                    onChange={(event) => setLightAzimuth(Number(event.target.value))}
-                  />
+                  <input aria-label="光照水平角" type="range" min="-180" max="180" step="1" value={lightAzimuth} onChange={(event) => setLightAzimuth(Number(event.target.value))} disabled={!lightEnabled} />
                   <div className="model3d-unit-input compact">
-                    <input
-                      aria-label="光照水平角数值"
-                      type="number"
-                      min="-180"
-                      max="180"
-                      value={lightAzimuth}
-                      onChange={(event) => setLightAzimuth(Math.max(-180, Math.min(180, Number(event.target.value) || 0)))}
-                    />
-                    <span>°</span>
+                    <input aria-label="光照水平角数值" type="number" min="-180" max="180" value={lightAzimuth} onChange={(event) => setLightAzimuth(Math.max(-180, Math.min(180, Number(event.target.value) || 0)))} disabled={!lightEnabled} /><span>°</span>
                   </div>
                 </div>
               </label>
-
               <label className="model3d-field">
                 <span>光照高度</span>
                 <div className="model3d-range-row">
-                  <input
-                    aria-label="光照高度"
-                    type="range"
-                    min="20"
-                    max="85"
-                    step="1"
-                    value={lightElevation}
-                    onChange={(event) => setLightElevation(Number(event.target.value))}
-                  />
+                  <input aria-label="光照高度" type="range" min="20" max="85" step="1" value={lightElevation} onChange={(event) => setLightElevation(Number(event.target.value))} disabled={!lightEnabled} />
                   <div className="model3d-unit-input compact">
-                    <input
-                      aria-label="光照高度数值"
-                      type="number"
-                      min="20"
-                      max="85"
-                      value={lightElevation}
-                      onChange={(event) => setLightElevation(Math.max(20, Math.min(85, Number(event.target.value) || 20)))}
-                    />
-                    <span>°</span>
+                    <input aria-label="光照高度数值" type="number" min="20" max="85" value={lightElevation} onChange={(event) => setLightElevation(Math.max(20, Math.min(85, Number(event.target.value) || 20)))} disabled={!lightEnabled} /><span>°</span>
                   </div>
                 </div>
                 <small>降低高度会拉长投影，提高高度会缩短投影。</small>
@@ -781,40 +2057,24 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
             </section>
 
             <section className="model3d-control-section">
-              <div className="model3d-section-title">
-                <ImagePlus size={15} />
-                <strong>视窗尺寸</strong>
-              </div>
+              <div className="model3d-section-title"><ImagePlus size={15} /><strong>视窗尺寸</strong></div>
               <div className="model3d-size-options">
                 {viewportPresets.map((preset) => (
-                  <button
-                    type="button"
-                    className={preset.id === viewportId ? 'active' : ''}
-                    onClick={() => setViewportId(preset.id)}
-                    key={preset.id}
-                  >
-                    <span>{preset.label}</span>
-                    <small>{preset.width} × {preset.height}</small>
-                    {preset.id === viewportId && <Check size={14} />}
+                  <button type="button" className={preset.id === viewportId ? 'active' : ''} onClick={() => setViewportId(preset.id)} key={preset.id}>
+                    <span>{preset.label}</span><small>{preset.width} × {preset.height}</small>{preset.id === viewportId && <Check size={14} />}
                   </button>
                 ))}
               </div>
             </section>
-
             {error && <div className="model3d-error" role="alert">{error}</div>}
           </aside>
         </div>
 
         <footer className="model3d-foot">
-          <p>左键旋转，滚轮缩放，右键平移。导出会使用所选视窗尺寸。</p>
+          <p>模型：单击选择，W 移动，R 旋转，Delete 删除，Ctrl+Z 撤销。视角：左键旋转，中键平移，滚轮缩放，右键也可平移。</p>
           <div>
             <button className="model3d-secondary-button" type="button" onClick={onClose}>取消</button>
-            <button
-              className="model3d-export-button"
-              type="button"
-              onClick={exportCurrentView}
-              disabled={!hasModel || loading || exporting}
-            >
+            <button className="model3d-export-button" type="button" onClick={exportCurrentView} disabled={!hasModel || loading || exporting}>
               {exporting ? <Loader2 className="model3d-spinner" size={15} /> : <ImagePlus size={15} />}
               {exporting ? '正在导出' : '导出到画板'}
             </button>
