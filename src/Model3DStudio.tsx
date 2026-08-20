@@ -22,6 +22,7 @@ import {
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
+import UnifiedRange from './UnifiedRange'
 import './Model3DStudio.css'
 
 type ViewportPreset = {
@@ -1929,7 +1930,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
               <label className="model3d-field">
                 <span>焦距</span>
                 <div className="model3d-range-row">
-                  <input type="range" min="18" max="120" step="1" value={focalLength} onChange={(event) => setFocalLength(Number(event.target.value))} disabled={!hasModel} />
+                  <UnifiedRange min={18} max={120} step={1} value={focalLength} onValueChange={setFocalLength} disabled={!hasModel} />
                   <div className="model3d-unit-input">
                     <input type="number" min="18" max="120" value={focalLength} onChange={(event) => setFocalLength(Math.max(18, Math.min(120, Number(event.target.value) || 18)))} disabled={!hasModel} />
                     <span>mm</span>
@@ -1940,7 +1941,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
               <label className="model3d-field">
                 <span>相机距离</span>
                 <div className="model3d-range-row">
-                  <input type="range" min="0.2" max="30" step="0.1" value={cameraDistance} onChange={(event) => changeCameraDistance(Number(event.target.value))} disabled={!hasModel} />
+                  <UnifiedRange min={0.2} max={30} step={0.1} value={cameraDistance} onValueChange={changeCameraDistance} disabled={!hasModel} />
                   <div className="model3d-unit-input compact">
                     <input type="number" min="0.2" max="30" step="0.1" value={cameraDistance} onChange={(event) => changeCameraDistance(Number(event.target.value))} disabled={!hasModel} />
                   </div>
@@ -1994,14 +1995,13 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
               <label className="model3d-field">
                 <span>灯光强度</span>
                 <div className="model3d-range-row">
-                  <input
+                  <UnifiedRange
                     aria-label="灯光强度"
-                    type="range"
-                    min="10"
-                    max="200"
-                    step="5"
+                    min={10}
+                    max={200}
+                    step={5}
                     value={lightIntensity}
-                    onChange={(event) => setLightIntensity(Number(event.target.value))}
+                    onValueChange={setLightIntensity}
                     disabled={!lightEnabled}
                   />
                   <div className="model3d-unit-input compact">
@@ -2038,7 +2038,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
               <label className="model3d-field">
                 <span>水平角</span>
                 <div className="model3d-range-row">
-                  <input aria-label="光照水平角" type="range" min="-180" max="180" step="1" value={lightAzimuth} onChange={(event) => setLightAzimuth(Number(event.target.value))} disabled={!lightEnabled} />
+                  <UnifiedRange aria-label="光照水平角" min={-180} max={180} step={1} value={lightAzimuth} onValueChange={setLightAzimuth} disabled={!lightEnabled} />
                   <div className="model3d-unit-input compact">
                     <input aria-label="光照水平角数值" type="number" min="-180" max="180" value={lightAzimuth} onChange={(event) => setLightAzimuth(Math.max(-180, Math.min(180, Number(event.target.value) || 0)))} disabled={!lightEnabled} /><span>°</span>
                   </div>
@@ -2047,7 +2047,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
               <label className="model3d-field">
                 <span>光照高度</span>
                 <div className="model3d-range-row">
-                  <input aria-label="光照高度" type="range" min="20" max="85" step="1" value={lightElevation} onChange={(event) => setLightElevation(Number(event.target.value))} disabled={!lightEnabled} />
+                  <UnifiedRange aria-label="光照高度" min={20} max={85} step={1} value={lightElevation} onValueChange={setLightElevation} disabled={!lightEnabled} />
                   <div className="model3d-unit-input compact">
                     <input aria-label="光照高度数值" type="number" min="20" max="85" value={lightElevation} onChange={(event) => setLightElevation(Math.max(20, Math.min(85, Number(event.target.value) || 20)))} disabled={!lightEnabled} /><span>°</span>
                   </div>

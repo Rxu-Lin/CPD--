@@ -46,6 +46,7 @@ import {
   Loader2,
   Pencil,
   RefreshCw,
+  Save,
   Settings,
   Trash2,
   Upload,
@@ -59,6 +60,7 @@ import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent }
 import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
 import SpecularButton from './SpecularButton'
+import UnifiedRange from './UnifiedRange'
 import './App.css'
 import {
   defaultGrsAiModel,
@@ -147,6 +149,7 @@ function repaintPromptWithColor(prompt: string, brushColor: RepaintBrushColor) {
 type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'volcengine' | 'custom'
 type AspectRatioValue = '16:9' | '3:2' | '4:3' | '1:1' | '3:4' | '2:3' | '9:16'
 type ImageResolutionTier = '1K' | '2K' | '4K'
+type Change2ProApiFamily = 'image2' | 'nanoBanana'
 
 type ApiConfig = {
   mode: ApiMode
@@ -157,6 +160,7 @@ type ApiConfig = {
   size: string
   bodyTemplate: string
   responsePath: string
+  change2ProFamily?: Change2ProApiFamily
 }
 
 type Change2ProModelOption = {
@@ -293,6 +297,32 @@ type ProjectFile = {
   history: GenerationRecord[]
 }
 
+type ProjectArchiveWritable = {
+  write: (data: Blob) => Promise<void>
+  close: () => Promise<void>
+  abort?: () => Promise<void>
+}
+
+type ProjectArchiveFileHandle = {
+  kind: 'file'
+  name: string
+  getFile: () => Promise<File>
+  createWritable: () => Promise<ProjectArchiveWritable>
+  queryPermission?: (options: { mode: 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>
+  requestPermission?: (options: { mode: 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>
+}
+
+type ProjectFilePickerWindow = Window & {
+  showOpenFilePicker?: (options: {
+    multiple?: boolean
+    types?: Array<{ description: string; accept: Record<string, string[]> }>
+  }) => Promise<ProjectArchiveFileHandle[]>
+  showSaveFilePicker?: (options: {
+    suggestedName?: string
+    types?: Array<{ description: string; accept: Record<string, string[]> }>
+  }) => Promise<ProjectArchiveFileHandle>
+}
+
 type CanvasContextMenu = {
   x: number
   y: number
@@ -305,6 +335,7 @@ type GroupDialogState =
 
 const API_STORAGE_KEY = 'node-banana-api-config'
 const API_PROFILE_STORAGE_KEY_PREFIX = 'node-banana-api-profile:'
+const CHANGE2PRO_FAMILY_PROFILE_KEY_PREFIX = 'node-banana-change2pro-profile:'
 const workflowEdgeColor = 'rgba(255, 255, 255, 0.88)'
 
 const defaultApiConfig: ApiConfig = {
@@ -331,6 +362,7 @@ const change2ProApiConfig: Partial<ApiConfig> = {
   model: 'gpt-image-2',
   imageSize: '1K',
   responsePath: 'data.0.url',
+  change2ProFamily: 'image2',
 }
 
 const volcengineApiConfig: Partial<ApiConfig> = {
@@ -349,6 +381,41 @@ function apiModelDisplayName(model: string) {
 
 function apiProfileStorageKey(mode: ApiMode) {
   return `${API_PROFILE_STORAGE_KEY_PREFIX}${mode}`
+}
+
+function change2ProFamilyProfileKey(family: Change2ProApiFamily) {
+  return `${CHANGE2PRO_FAMILY_PROFILE_KEY_PREFIX}${family}`
+}
+
+function change2ProFamilyFromModel(model: string): Change2ProApiFamily {
+  const value = model.trim().toLowerCase().replaceAll('_', '-').replaceAll('.', '-')
+  return /nano-?banana|gemini.*image/.test(value) ? 'nanoBanana' : 'image2'
+}
+
+function change2ProModelMatchesFamily(model: string, family: Change2ProApiFamily) {
+  const value = model.trim().toLowerCase().replaceAll('_', '-').replaceAll('.', '-')
+  if (family === 'nanoBanana') return /nano-?banana|gemini.*image/.test(value)
+  return /gpt-?image|(^|-)image2(?:-|$)/.test(value)
+}
+
+function change2ProDefaultModel(family: Change2ProApiFamily) {
+  return family === 'nanoBanana' ? 'gemini-3.1-flash-image-preview' : 'gpt-image-2'
+}
+
+function readStoredChange2ProFamilyProfile(family: Change2ProApiFamily) {
+  try {
+    const saved = window.localStorage.getItem(change2ProFamilyProfileKey(family))
+    return saved ? (JSON.parse(saved) as Partial<ApiConfig>) : null
+  } catch {
+    return null
+  }
+}
+
+function writeStoredChange2ProFamilyProfile(family: Change2ProApiFamily, config: ApiConfig) {
+  window.localStorage.setItem(
+    change2ProFamilyProfileKey(family),
+    JSON.stringify({ ...config, mode: 'change2pro', change2ProFamily: family }),
+  )
 }
 
 function readStoredApiProfile(mode: ApiMode) {
@@ -567,6 +634,12 @@ function readStoredApiConfig() {
         model: normalizeGrsAiModel(config.model),
       }
     }
+    if (config.mode === 'change2pro') {
+      return {
+        ...config,
+        change2ProFamily: config.change2ProFamily || change2ProFamilyFromModel(config.model),
+      }
+    }
     return config.apiKey?.trim() && config.mode === 'mock' ? { ...config, mode: 'openai' as const } : config
   } catch {
     return defaultApiConfig
@@ -731,6 +804,28 @@ function projectPackageFileName(projectName: string) {
     .replace(/\s+/g, '-')
     .slice(0, 90)
   return `${name || 'ai-canvas'}.aicanvas.zip`
+}
+
+function isPickerCancelled(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+async function requestProjectFileWritePermission(handle: ProjectArchiveFileHandle) {
+  const permissionOptions = { mode: 'readwrite' } as const
+  if (handle.queryPermission && (await handle.queryPermission(permissionOptions)) === 'granted') return true
+  if (handle.requestPermission) return (await handle.requestPermission(permissionOptions)) === 'granted'
+  return true
+}
+
+async function writeProjectPackage(handle: ProjectArchiveFileHandle, packageBlob: Blob) {
+  const writable = await handle.createWritable()
+  try {
+    await writable.write(packageBlob)
+    await writable.close()
+  } catch (error) {
+    await writable.abort?.().catch(() => undefined)
+    throw error
+  }
 }
 
 function getClientPosition(event: MouseEvent | TouchEvent): XYPosition | null {
@@ -1464,7 +1559,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 style={{ top }}
                 isConnectable={!slot.connected}
                 aria-label={`${label} 输入`}
-                title={`连接到 ${label}`}
+                title={`连接到 ${label}，或向左拖出参考图节点`}
               />,
             ]
           })}
@@ -1484,7 +1579,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             style={{ top: inputPortTop(imageInputSlots.length) }}
             isConnectable={!data.promptInputConnected}
             aria-label="Prompt 输入"
-            title="连接提示词节点"
+            title="连接提示词节点，或向左拖出提示词节点"
           />
         </>
       )}
@@ -1641,12 +1736,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             </div>
             <label className="repaint-size-control">
               <span>画笔</span>
-              <input
-                type="range"
-                min="10"
-                max="96"
+              <UnifiedRange
+                min={10}
+                max={96}
                 value={brushSize}
-                onChange={(event) => data.onChangeBrush?.(nodeId, Number(event.target.value))}
+                onValueChange={(value) => data.onChangeBrush?.(nodeId, value)}
               />
               <em>{brushSize}</em>
             </label>
@@ -1845,6 +1939,7 @@ const workflowEdgeTypes = { disconnectible: DisconnectibleEdge } satisfies EdgeT
 export default function App() {
   const importInputRef = useRef<HTMLInputElement>(null)
   const referenceInputRef = useRef<HTMLInputElement>(null)
+  const openedProjectHandleRef = useRef<ProjectArchiveFileHandle | null>(null)
   const pendingNodePositionRef = useRef<XYPosition | null>(null)
   const connectingFromNodeIdRef = useRef<string | null>(null)
   const [nodes, setNodes, onNodesChange] = useNodesState<WorkflowNode>([])
@@ -1873,6 +1968,8 @@ export default function App() {
   const change2ProModelRequestIdRef = useRef(0)
   const [history, setHistory] = useState<GenerationRecord[]>([])
   const [isExporting, setIsExporting] = useState(false)
+  const [isProjectSaving, setIsProjectSaving] = useState(false)
+  const [openedProjectFileName, setOpenedProjectFileName] = useState('')
   const [, setToast] = useState('已准备好，默认使用本地模拟生成。')
   const [welcomeDismissed, setWelcomeDismissed] = useState(false)
   const [welcomeTitleIndex, setWelcomeTitleIndex] = useState(0)
@@ -1881,10 +1978,11 @@ export default function App() {
 
   const loadChange2ProModels = useCallback(async () => {
     const apiKey = apiConfig.apiKey.trim()
+    const family = apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)
     if (!apiKey) {
       setChange2ProModels([])
       setChange2ProModelStatus('idle')
-      setChange2ProModelMessage('请先填写 Change2Pro API Key。')
+      setChange2ProModelMessage(`请先填写 ${family === 'image2' ? 'Image 2' : 'Nano Banana'} API Key。`)
       return
     }
 
@@ -1894,17 +1992,23 @@ export default function App() {
     setChange2ProModelMessage('正在读取当前 Key 可用的生图模型…')
 
     try {
-      const models = await requestChange2ProModels(apiKey)
+      const availableModels = await requestChange2ProModels(apiKey)
       if (change2ProModelRequestIdRef.current !== requestId) return
+      const models = availableModels.filter((model) => change2ProModelMatchesFamily(model.id, family))
+      if (!models.length) {
+        throw new Error(`当前 Key 没有返回可用的 ${family === 'image2' ? 'Image 2' : 'Nano Banana'} 模型。`)
+      }
       setChange2ProModels(models)
       setChange2ProModelStatus('success')
-      setChange2ProModelMessage(`已读取 ${models.length} 个生图模型。`)
+      setChange2ProModelMessage(`已从对应 API 读取 ${models.length} 个${family === 'image2' ? ' Image 2' : ' Nano Banana'} 模型。`)
       setApiConfig((current) => {
-        if (current.mode !== 'change2pro' || current.apiKey.trim() !== apiKey) return current
+        const currentFamily = current.change2ProFamily || change2ProFamilyFromModel(current.model)
+        if (current.mode !== 'change2pro' || current.apiKey.trim() !== apiKey || currentFamily !== family) return current
         if (models.some((model) => model.id === current.model)) return current
-        const next = { ...current, model: models[0].id }
+        const next = { ...current, model: models[0].id, change2ProFamily: family }
         window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
         window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
+        writeStoredChange2ProFamilyProfile(family, next)
         return next
       })
     } catch (error) {
@@ -1914,7 +2018,7 @@ export default function App() {
       setChange2ProModelStatus('error')
       setChange2ProModelMessage(message)
     }
-  }, [apiConfig.apiKey])
+  }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.model])
 
   useEffect(() => {
     setEdges((current) => normalizeImageInputEdges(current, nodes))
@@ -1947,7 +2051,7 @@ export default function App() {
       void loadChange2ProModels()
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [apiConfig.apiKey, apiConfig.mode, loadChange2ProModels, showSettings])
+  }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.mode, loadChange2ProModels, showSettings])
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<WorkflowNode>[]) => {
@@ -2500,26 +2604,93 @@ export default function App() {
     [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes],
   )
 
+  const createInputNodeFromTarget = useCallback(
+    (targetNode: WorkflowNode, targetHandleId: string | null, dropPosition: XYPosition) => {
+      const createsPrompt = targetHandleId === 'prompt'
+      const createsReference = isImageInputHandle(targetHandleId)
+      if (!createsPrompt && !createsReference) return
+
+      const createdAt = new Date().toLocaleString('zh-CN')
+      const inputNodeId = id(createsPrompt ? 'prompt' : 'ref')
+      const nodeWidth = createsPrompt ? 330 : 312
+      const node: WorkflowNode = {
+        id: inputNodeId,
+        type: 'workflow',
+        position: {
+          x: dropPosition.x - nodeWidth,
+          y: dropPosition.y - (createsPrompt ? 110 : 150),
+        },
+        selected: true,
+        data: createsPrompt
+          ? {
+              kind: 'prompt',
+              title: '提示词输入框',
+              prompt: '',
+              status: 'idle',
+              model: apiConfig.model,
+              size: targetNode.data.size || apiConfig.size,
+              createdAt,
+            }
+          : {
+              kind: 'reference',
+              title: '参考图像',
+              status: 'idle',
+              model: '上传',
+              size: targetNode.data.size || apiConfig.size,
+              createdAt,
+            },
+      }
+      const edge: Edge = {
+        id: id('edge'),
+        source: inputNodeId,
+        sourceHandle: 'output',
+        target: targetNode.id,
+        targetHandle: targetHandleId,
+        animated: true,
+        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+        style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
+      }
+
+      setNodes((current) => [
+        ...current.map((currentNode) => ({ ...currentNode, selected: false })),
+        node,
+      ])
+      setEdges((current) => normalizeImageInputEdges([...current, edge], [...nodes, node]))
+      setSelectedNodeId(inputNodeId)
+      markDirty()
+      setToast(createsPrompt ? '已拖出并连接空白提示词节点。' : '已拖出并连接空白参考图节点，请上传图片。')
+    },
+    [apiConfig.model, apiConfig.size, markDirty, nodes, setEdges, setNodes],
+  )
+
   const handleConnectStart = useCallback<OnConnectStart>((_, params) => {
     connectingFromNodeIdRef.current = params.handleType === 'source' ? params.nodeId : null
   }, [])
 
   const handleConnectEnd = useCallback<OnConnectEnd>(
     (event, connectionState) => {
+      const fromHandle = connectionState.fromHandle
+      const fromNodeId = connectionState.fromNode?.id ?? fromHandle?.nodeId
       const sourceId = connectionState.fromNode?.id ?? connectionState.fromHandle?.nodeId ?? connectingFromNodeIdRef.current
       connectingFromNodeIdRef.current = null
-      if (connectionState.toNode || connectionState.fromHandle?.type === 'target') return
-
-      const sourceNode = nodes.find((node) => node.id === sourceId)
-      if (!sourceNode || !flowInstance) return
+      if (connectionState.toNode) return
 
       const clientPosition = getClientPosition(event)
-      if (!clientPosition) return
+      if (!clientPosition || !flowInstance) return
 
       const dropPosition = flowInstance.screenToFlowPosition(clientPosition, {
         snapToGrid: true,
         snapGrid: [24, 24],
       })
+
+      if (fromHandle?.type === 'target') {
+        const targetNode = nodes.find((node) => node.id === fromNodeId)
+        if (targetNode) createInputNodeFromTarget(targetNode, fromHandle.id ?? null, dropPosition)
+        return
+      }
+
+      const sourceNode = nodes.find((node) => node.id === sourceId)
+      if (!sourceNode) return
       if (sourceNode.data.kind === 'reference') {
         void createReferenceOutput(sourceNode, dropPosition)
       }
@@ -2541,7 +2712,7 @@ export default function App() {
         void createReferenceOutput(sourceNode, dropPosition)
       }
     },
-    [createReferenceOutput, createRepaintOutput, flowInstance, nodes],
+    [createInputNodeFromTarget, createReferenceOutput, createRepaintOutput, flowInstance, nodes],
   )
 
   const closeContextMenu = useCallback(() => {
@@ -3334,8 +3505,94 @@ export default function App() {
     referenceInputRef.current?.click()
   }
 
+  async function saveProject() {
+    if (isProjectSaving || isExporting) return
+
+    const pickerWindow = window as ProjectFilePickerWindow
+    const replacingOpenedPackage = Boolean(openedProjectHandleRef.current)
+    let targetHandle = openedProjectHandleRef.current
+
+    try {
+      if (!targetHandle && pickerWindow.showSaveFilePicker) {
+        targetHandle = await pickerWindow.showSaveFilePicker({
+          suggestedName: projectPackageFileName(projectName),
+          types: [{ description: 'AI 画布项目包', accept: { 'application/zip': ['.zip'] } }],
+        })
+      }
+      if (targetHandle && !(await requestProjectFileWritePermission(targetHandle))) {
+        setToast('未获得项目文件的写入权限，保存已取消。')
+        return
+      }
+    } catch (error) {
+      if (!isPickerCancelled(error)) setToast(error instanceof Error ? error.message : '无法选择保存位置')
+      return
+    }
+
+    let sessionId = ''
+    let sessionClosed = false
+    setIsProjectSaving(true)
+    try {
+      setToast(targetHandle ? '正在保存项目包...' : '正在整理项目，请选择保存文件夹...')
+      sessionId = await startProjectPackage()
+      const canvasSnapshot = flowInstance?.toObject()
+      const project = await buildPackageProject(
+        sessionId,
+        projectName,
+        (canvasSnapshot?.nodes as WorkflowNode[] | undefined) ?? nodes,
+        canvasSnapshot?.edges ?? edges,
+        history,
+      )
+      const packageName = projectPackageFileName(projectName)
+      const downloadQuery = targetHandle ? '&download=1' : ''
+      const response = await fetch(
+        `/api/projects/package/finish?sessionId=${encodeURIComponent(sessionId)}&filename=${encodeURIComponent(packageName)}${downloadQuery}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json;charset=utf-8' },
+          body: JSON.stringify(project),
+        },
+      )
+      sessionClosed = true
+
+      if (targetHandle) {
+        if (!response.ok || !response.headers.get('content-type')?.includes('application/zip')) {
+          const payload = (await response.json().catch(() => null)) as PackageResponse | null
+          throw new Error(payload?.error || '项目包生成失败')
+        }
+        await writeProjectPackage(targetHandle, await response.blob())
+        openedProjectHandleRef.current = targetHandle
+        setOpenedProjectFileName(targetHandle.name)
+        setDirty(false)
+        setToast(replacingOpenedPackage ? `已保存并替换 ${targetHandle.name}` : `项目已保存到 ${targetHandle.name}`)
+        return
+      }
+
+      if (response.headers.get('content-type')?.includes('application/zip')) {
+        if (!response.ok) throw new Error('项目包下载失败')
+        const downloadUrl = URL.createObjectURL(await response.blob())
+        downloadImage(downloadUrl, packageName)
+        window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000)
+        setDirty(false)
+        setToast('项目包已下载；当前浏览器不支持直接覆盖原文件。')
+        return
+      }
+
+      const payload = await readPackageResponse(response)
+      if (payload?.cancelled) return
+      setDirty(false)
+      setToast('项目包已保存到选择的文件夹。')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '保存失败'
+      setToast(message)
+      window.alert(`保存失败：${message}`)
+    } finally {
+      if (sessionId && !sessionClosed) void cancelProjectPackage(sessionId)
+      setIsProjectSaving(false)
+    }
+  }
+
   async function exportProject() {
-    if (isExporting) return
+    if (isExporting || isProjectSaving) return
     let sessionId = ''
     let sessionClosed = false
     setIsExporting(true)
@@ -3388,15 +3645,17 @@ export default function App() {
     setEdges(project.edges)
     setHistory(project.history)
     setSelectedNodeId(null)
-    setDirty(true)
+    setDirty(false)
     setToast('项目已导入，图片将从项目缓存按需加载。')
   }
 
   async function importProjectText(text: string) {
     try {
       applyImportedProject(JSON.parse(text) as Partial<ProjectFile>)
+      return true
     } catch (error) {
       setToast(error instanceof Error && error.message === 'INVALID_PROJECT' ? '导入失败：请选择 AI 画布项目文件。' : '导入失败：文件不是有效项目。')
+      return false
     }
   }
 
@@ -3411,22 +3670,54 @@ export default function App() {
         const payload = (await response.json().catch(() => null)) as { project?: Partial<ProjectFile>; error?: string } | null
         if (!response.ok || !payload?.project) throw new Error(payload?.error || '项目包导入失败')
         applyImportedProject(payload.project)
-        return
+        return true
       }
-      await importProjectText(await file.text())
+      return await importProjectText(await file.text())
     } catch (error) {
       setToast(error instanceof Error ? error.message : '导入项目失败')
+      return false
     }
   }
 
-  function chooseProjectToImport() {
-    importInputRef.current?.click()
+  async function chooseProjectToImport() {
+    const pickerWindow = window as ProjectFilePickerWindow
+    if (!pickerWindow.showOpenFilePicker) {
+      importInputRef.current?.click()
+      return
+    }
+
+    try {
+      const [handle] = await pickerWindow.showOpenFilePicker({
+        multiple: false,
+        types: [
+          { description: 'AI 画布项目', accept: { 'application/zip': ['.zip'], 'application/json': ['.json'] } },
+        ],
+      })
+      if (!handle) return
+      const imported = await importProjectFile(await handle.getFile())
+      if (!imported) return
+      if (/\.zip$/i.test(handle.name)) {
+        openedProjectHandleRef.current = handle
+        setOpenedProjectFileName(handle.name)
+      } else {
+        openedProjectHandleRef.current = null
+        setOpenedProjectFileName('')
+      }
+    } catch (error) {
+      if (!isPickerCancelled(error)) setToast(error instanceof Error ? error.message : '打开项目失败')
+    }
   }
 
   function importProject(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     event.target.value = ''
-    if (file) void importProjectFile(file)
+    if (file) {
+      void importProjectFile(file).then((imported) => {
+        if (!imported) return
+        openedProjectHandleRef.current = null
+        setOpenedProjectFileName('')
+      })
+    }
   }
 
   function addReferenceImage(event: ChangeEvent<HTMLInputElement>) {
@@ -3529,6 +3820,12 @@ export default function App() {
 
       if (requestedMode && requestedMode !== current.mode) {
         window.localStorage.setItem(apiProfileStorageKey(current.mode), JSON.stringify(current))
+        if (current.mode === 'change2pro') {
+          writeStoredChange2ProFamilyProfile(
+            current.change2ProFamily || change2ProFamilyFromModel(current.model),
+            current,
+          )
+        }
         const storedProfile = readStoredApiProfile(requestedMode)
         next = {
           ...defaultApiConfig,
@@ -3542,8 +3839,48 @@ export default function App() {
         next = { ...current, ...patch, mode }
       }
 
+      if (next.mode === 'change2pro') {
+        next = {
+          ...next,
+          change2ProFamily: next.change2ProFamily || change2ProFamilyFromModel(next.model),
+        }
+      }
+
       window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
       window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
+      if (next.mode === 'change2pro') {
+        writeStoredChange2ProFamilyProfile(next.change2ProFamily || change2ProFamilyFromModel(next.model), next)
+      }
+      return next
+    })
+  }
+
+  function switchChange2ProFamily(family: Change2ProApiFamily) {
+    setChange2ProModels([])
+    setChange2ProModelStatus('idle')
+    setChange2ProModelMessage(`已切换到 ${family === 'image2' ? 'Image 2' : 'Nano Banana'} API 配置。`)
+
+    setApiConfig((current) => {
+      const currentFamily = current.change2ProFamily || change2ProFamilyFromModel(current.model)
+      if (currentFamily === family) return current
+
+      writeStoredChange2ProFamilyProfile(currentFamily, current)
+      const storedProfile = readStoredChange2ProFamilyProfile(family)
+      const next: ApiConfig = {
+        ...current,
+        mode: 'change2pro',
+        endpoint: 'https://api.change2pro.com/v1/images/generations',
+        apiKey: '',
+        model: change2ProDefaultModel(family),
+        imageSize: '1K',
+        responsePath: 'data.0.url',
+        ...storedProfile,
+        change2ProFamily: family,
+      }
+
+      window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
+      window.localStorage.setItem(apiProfileStorageKey('change2pro'), JSON.stringify(next))
+      writeStoredChange2ProFamilyProfile(family, next)
       return next
     })
   }
@@ -3584,7 +3921,7 @@ export default function App() {
         </div>
 
         <div className="header-actions">
-          <button type="button" onClick={exportProject} title="导出 ZIP 项目包" disabled={isExporting}>
+          <button type="button" onClick={exportProject} title="导出 ZIP 项目包" disabled={isExporting || isProjectSaving}>
             {isExporting ? <Loader2 className="export-spinner" size={15} /> : <Download size={15} />}
             {isExporting ? '导出中' : '导出'}
           </button>
@@ -3592,13 +3929,18 @@ export default function App() {
             <Upload size={15} />
             导入
           </button>
-          <button type="button" onClick={() => setShowModelStudio(true)} title="导入并预览 OBJ 或 FBX 模型">
-            <Box size={15} />
-            3D 模型
-          </button>
           <button type="button" onClick={() => setShowSettings(true)} title="API 设置">
             <Settings size={15} />
             设置
+          </button>
+          <button
+            type="button"
+            onClick={() => void saveProject()}
+            title={openedProjectFileName ? `保存并替换 ${openedProjectFileName}` : '保存项目包到自定义位置'}
+            disabled={isProjectSaving || isExporting}
+          >
+            {isProjectSaving ? <Loader2 className="export-spinner" size={15} /> : <Save size={15} />}
+            {isProjectSaving ? '保存中' : '保存'}
           </button>
           <button
             className={`api-status-button ${apiConfig.mode} ${apiConfig.apiKey ? 'configured' : ''}`}
@@ -3860,6 +4202,37 @@ export default function App() {
               </section>
             )}
           </div>
+          <div className="model3d-left-popover">
+            <SpecularButton
+              className={`prompt-library-toggle ${showModelStudio ? 'active' : ''}`}
+              size="md"
+              radius={8}
+              tint="#ffffff"
+              tintOpacity={0}
+              blur={0}
+              textColor="#f5f5f5"
+              lineColor="#ffffff"
+              baseColor="#525252"
+              intensity={0.8}
+              shineSize={11}
+              shineFade={31}
+              thickness={1.3}
+              speed={0.3}
+              proximity={50}
+              followMouse
+              autoAnimate={false}
+              onClick={() => {
+                setShowQuickWorkflows(false)
+                setShowPromptLibrary(false)
+                setShowModelStudio(true)
+              }}
+              title="打开 3D 模型预览"
+              aria-label="打开 3D 模型预览"
+            >
+              <Box size={15} />
+              3D 模型
+            </SpecularButton>
+          </div>
           <div className={`history-popover ${showHistoryPanel ? 'expanded' : ''}`}>
             <button
               className={`history-toggle ${showHistoryPanel ? 'active' : ''}`}
@@ -4086,6 +4459,29 @@ export default function App() {
                   </select>
                 ) : apiConfig.mode === 'change2pro' ? (
                   <>
+                    <div className="change2pro-family-picker" role="group" aria-label="选择模型 API">
+                      <button
+                        className={(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2' ? 'active' : ''}
+                        type="button"
+                        aria-pressed={(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2'}
+                        onClick={() => switchChange2ProFamily('image2')}
+                      >
+                        <strong>Image 2</strong>
+                        <small>独立 API</small>
+                      </button>
+                      <button
+                        className={(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'nanoBanana' ? 'active' : ''}
+                        type="button"
+                        aria-pressed={(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'nanoBanana'}
+                        onClick={() => switchChange2ProFamily('nanoBanana')}
+                      >
+                        <strong>Nano Banana</strong>
+                        <small>独立 API</small>
+                      </button>
+                    </div>
+                    <small className="change2pro-family-help">
+                      切换模型系列时会自动载入对应的 Endpoint、API Key、模型与清晰度。
+                    </small>
                     <div className="change2pro-model-picker">
                       <select
                         aria-label="Change2Pro 生图模型"
@@ -4154,7 +4550,10 @@ export default function App() {
                 )}
               </div>
               <label className="field wide">
-                <span>Endpoint</span>
+                <span>
+                  Endpoint
+                  {apiConfig.mode === 'change2pro' && ` · ${(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2' ? 'Image 2' : 'Nano Banana'}`}
+                </span>
                 <input
                   value={apiConfig.endpoint}
                   onChange={(event) => updateApiConfig({ endpoint: event.target.value })}
@@ -4162,7 +4561,10 @@ export default function App() {
                 />
               </label>
               <label className="field wide">
-                <span>API Key</span>
+                <span>
+                  API Key
+                  {apiConfig.mode === 'change2pro' && ` · ${(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2' ? 'Image 2' : 'Nano Banana'}`}
+                </span>
                 <input
                   type="password"
                   value={apiConfig.apiKey}

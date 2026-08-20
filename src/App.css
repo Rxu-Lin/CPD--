@@ -40,7 +40,7 @@
   align-items: center;
   gap: 18px;
   border-bottom: 1px solid var(--line);
-  background: #000000;
+  background: var(--canvas);
   padding: 0 18px;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.025) inset;
 }
@@ -63,7 +63,7 @@
   flex: 0 0 auto;
   place-items: center;
   border-radius: 8px;
-  background: #000000;
+  background: var(--canvas);
 }
 
 .brand-mark img {
@@ -71,7 +71,7 @@
   width: 100%;
   height: 100%;
   border-radius: 8px;
-  background: #000000;
+  background: var(--canvas);
   filter: grayscale(1) contrast(3);
   object-fit: cover;
 }
@@ -1261,47 +1261,6 @@
   accent-color: var(--accent);
 }
 
-.repaint-size-control input[type='range'] {
-  height: 16px;
-  appearance: none;
-  outline: none;
-  background: transparent;
-  cursor: pointer;
-}
-
-.repaint-size-control input[type='range']::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(97, 199, 232, 0.32);
-}
-
-.repaint-size-control input[type='range']::-webkit-slider-thumb {
-  width: 14px;
-  height: 14px;
-  margin-top: -5px;
-  appearance: none;
-  border: 2px solid #dff8ff;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(97, 199, 232, 0.12);
-}
-
-.repaint-size-control input[type='range']::-moz-range-track {
-  height: 4px;
-  border: 0;
-  border-radius: 999px;
-  background: rgba(97, 199, 232, 0.32);
-}
-
-.repaint-size-control input[type='range']::-moz-range-thumb {
-  width: 11px;
-  height: 11px;
-  border: 2px solid #dff8ff;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(97, 199, 232, 0.12);
-}
-
 .repaint-controls button {
   height: 34px;
   border: 1px solid var(--line);
@@ -1663,7 +1622,8 @@
 }
 
 .prompt-library-popover,
-.quick-workflow-popover {
+.quick-workflow-popover,
+.model3d-left-popover {
   position: absolute;
   left: 18px;
   z-index: 15;
@@ -1679,6 +1639,10 @@
 
 .quick-workflow-popover {
   top: calc(50% - 43px);
+}
+
+.model3d-left-popover {
+  top: calc(50% + 43px);
 }
 
 .prompt-library-toggle {
@@ -2500,6 +2464,64 @@
 
 .settings-grid .wide {
   grid-column: 1 / -1;
+}
+
+.change2pro-family-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.change2pro-family-picker button {
+  display: flex;
+  min-width: 0;
+  height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid rgba(142, 155, 170, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #abb7c2;
+  cursor: pointer;
+  padding: 0 11px;
+  text-align: left;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.change2pro-family-picker button:hover,
+.change2pro-family-picker button.active {
+  border-color: rgba(97, 199, 232, 0.42);
+  background: rgba(97, 199, 232, 0.1);
+  color: #eefbff;
+}
+
+.change2pro-family-picker button.active {
+  box-shadow: 0 0 0 1px rgba(97, 199, 232, 0.08) inset;
+}
+
+.change2pro-family-picker strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field .change2pro-family-picker small {
+  flex: 0 0 auto;
+  color: rgba(164, 178, 191, 0.68);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.field .change2pro-family-picker button.active small {
+  color: rgba(207, 243, 252, 0.76);
+}
+
+.field .change2pro-family-help {
+  color: rgba(154, 167, 182, 0.72);
+  font-size: 10px;
+  line-height: 1.45;
 }
 
 .change2pro-model-picker {

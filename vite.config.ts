@@ -1595,7 +1595,8 @@ function localImageLibraryPlugin(): Plugin {
 
           const requestedName = safeFileName(requestUrl.searchParams.get('filename') || 'ai-canvas.aicanvas.zip')
           const suggestedName = requestedName.toLowerCase().endsWith('.zip') ? requestedName : `${requestedName}.aicanvas.zip`
-          if (process.env.NODE_ENV === 'production') {
+          const forceDownload = requestUrl.searchParams.get('download') === '1'
+          if (process.env.NODE_ENV === 'production' || forceDownload) {
             res.statusCode = 200
             res.setHeader('Content-Type', 'application/zip')
             res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(suggestedName)}`)

@@ -12,8 +12,8 @@
 
 .model3d-studio {
   display: grid;
-  width: min(1440px, calc(100vw - 32px));
-  height: min(920px, calc(100dvh - 32px));
+  width: min(1800px, calc(100vw - 48px));
+  height: min(1120px, calc(100dvh - 48px));
   min-height: 620px;
   grid-template-rows: 64px minmax(0, 1fr) 62px;
   overflow: hidden;
@@ -934,9 +934,89 @@
 }
 
 .model3d-range-row > input[type='range'] {
+  appearance: none;
   width: 100%;
   min-width: 0;
-  accent-color: var(--accent);
+  height: 16px;
+  margin: 0;
+  border: 0;
+  border-radius: 999px;
+  outline: none;
+  background:
+    radial-gradient(circle 2.5px at left center, #ffffff 98%, transparent 100%) left center / 5px 5px no-repeat,
+    radial-gradient(circle 2.5px at right center, #ffffff 98%, transparent 100%) left center / var(--range-progress, 0%) 5px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 2.5px center / calc(var(--range-progress, 0%) - 5px) 5px no-repeat,
+    radial-gradient(circle 1.5px at left center, #555b62 98%, transparent 100%) left center / 3px 3px no-repeat,
+    radial-gradient(circle 1.5px at right center, #555b62 98%, transparent 100%) right center / 3px 3px no-repeat,
+    linear-gradient(#555b62, #555b62) 1.5px center / calc(100% - 3px) 3px no-repeat;
+  accent-color: #f4f4f5;
+  color-scheme: dark;
+  cursor: pointer;
+}
+
+.model3d-range-row > input[type='range']::-webkit-slider-runnable-track {
+  height: 16px;
+  background: transparent;
+}
+
+.model3d-range-row > input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.42);
+}
+
+.model3d-range-row > input[type='range']::-moz-range-track {
+  height: 3px;
+  border: 0;
+  border-radius: 999px;
+  background: #555b62;
+}
+
+.model3d-range-row > input[type='range']::-moz-range-progress {
+  height: 5px;
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.model3d-range-row > input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.42);
+}
+
+.model3d-range-row > input[type='range']:hover::-webkit-slider-thumb {
+  background: #ffffff;
+  border-color: #ffffff;
+}
+
+.model3d-range-row > input[type='range']:disabled {
+  opacity: 0.82;
+  cursor: not-allowed;
+}
+
+.model3d-range-row > input[type='range']:disabled::-webkit-slider-runnable-track {
+  background: transparent;
+}
+
+.model3d-range-row > input[type='range']:disabled::-webkit-slider-thumb {
+  border-color: #ffffff;
+  background: #ffffff;
+}
+
+.model3d-range-row > input[type='range']:disabled::-moz-range-track {
+  background: #555b62;
+}
+
+.model3d-range-row > input[type='range']:disabled::-moz-range-thumb {
+  border-color: #ffffff;
+  background: #ffffff;
 }
 
 .model3d-unit-input {
