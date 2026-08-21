@@ -27,8 +27,9 @@ const runtimeImageSessionId = '00000000-0000-4000-8000-000000000000'
 const runtimeImagesDir = path.join(projectCacheDir, runtimeImageSessionId, 'images')
 const generationRateLimits = new Map<string, { count: number; startedAt: number }>()
 
-type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'volcengine' | 'custom'
-type ImageResolutionTier = '1K' | '2K' | '4K'
+type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'agnes' | 'apimart' | 'custom'
+type ImageResolutionTier = '1K' | '1.5K' | '2K' | '3K' | '4K'
+type GptImageResolutionTier = '1K' | '2K' | '4K'
 
 type ApiConfig = {
   mode: ApiMode
@@ -627,7 +628,7 @@ function aspectRatioFromSize(size: string) {
   return map[size] || size || '1:1'
 }
 
-const gptImageSizesByTier: Record<ImageResolutionTier, Record<string, string>> = {
+const gptImageSizesByTier: Record<GptImageResolutionTier, Record<string, string>> = {
   '1K': {
     '16:9': '1672x941',
     '3:2': '1536x1024',
@@ -659,7 +660,8 @@ const gptImageSizesByTier: Record<ImageResolutionTier, Record<string, string>> =
 
 function gptImageSizeFromSize(size: string, imageSize: ImageResolutionTier = '1K') {
   const ratio = aspectRatioFromSize(size)
-  return gptImageSizesByTier[imageSize][ratio] || size || gptImageSizesByTier[imageSize]['1:1']
+  const tier: GptImageResolutionTier = imageSize === '2K' || imageSize === '4K' ? imageSize : '1K'
+  return gptImageSizesByTier[tier][ratio] || size || gptImageSizesByTier[tier]['1:1']
 }
 
 const supportedGptImageSizes = new Set(
@@ -1039,61 +1041,6 @@ async function requestGrsAiImage(config: ApiConfig, prompt: string, referenceIma
   throw new Error('GrsAI generation timed out. Please try again later.')
 }
 
-const volcengineSeedreamMaxReferenceImages = 10
-
-async function prepareVolcengineReferenceImages(imageUrls: string[]) {
-  if (imageUrls.length > volcengineSeedreamMaxReferenceImages) {
-    throw new UpstreamHttpError(`Seedream 5.0 最多支持 ${volcengineSeedreamMaxReferenceImages} 张参考图，当前已连接 ${imageUrls.length} 张。`, 400)
-  }
-
-  const preparedImages: string[] = []
-  let totalBytes = 0
-  for (const [index, imageUrl] of imageUrls.entries()) {
-    const image = await loadImageBuffer(imageUrl)
-    validateReferenceImage(image, index)
-    totalBytes += image.buffer.length
-    if (totalBytes > maxTotalReferenceImageBytes) {
-      throw new UpstreamHttpError('参考图总大小超过 48 MB，请减少图片或先压缩。', 400)
-    }
-    preparedImages.push(dataUrlFromImage(image))
-  }
-  return preparedImages
-}
-
-async function requestVolcengineSeedreamImage(
-  config: ApiConfig,
-  prompt: string,
-  referenceImageUrls: string[],
-  maskUrl?: string,
-) {
-  if (!config.apiKey?.trim()) throw new UpstreamHttpError('请先填写火山方舟 API Key。', 400)
-  const model = config.model?.trim()
-  if (!model) throw new UpstreamHttpError('请填写 Seedream 模型 ID 或方舟推理接入点 ID。', 400)
-
-  const endpoint = config.endpoint.trim()
-  const imageUrls = [...referenceImageUrls]
-  if (maskUrl && !imageUrls.includes(maskUrl)) imageUrls.push(maskUrl)
-  const images = await prepareVolcengineReferenceImages(imageUrls)
-  const payload: Record<string, unknown> = {
-    model,
-    prompt,
-    size: config.size?.trim() || '2K',
-    sequential_image_generation: 'disabled',
-    response_format: 'url',
-    watermark: false,
-  }
-  if (images.length) payload.image = images
-
-  try {
-    return await postJson(endpoint, { Authorization: `Bearer ${config.apiKey.trim()}` }, payload)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '火山方舟图片生成请求失败'
-    const detailedMessage = `${message}（模型 ${model}，输出 ${String(payload.size)}，参考图 ${images.length} 张）`
-    if (error instanceof UpstreamHttpError) throw new UpstreamHttpError(detailedMessage, error.statusCode)
-    throw new Error(detailedMessage)
-  }
-}
-
 function imagePayloadFromDataUrl(imageUrl?: string) {
   if (!imageUrl?.startsWith('data:image/')) return ''
   return imageUrl.slice(imageUrl.indexOf(',') + 1)
@@ -1128,6 +1075,7 @@ function isImageGenerationModel(modelId: string) {
   const id = modelId.trim().toLowerCase().replaceAll('_', '-').replaceAll('.', '-')
   return [
     /gpt-?image/,
+    /agnes-?image/,
     /nano-?banana/,
     /grok.*(?:image|imagine)/,
     /gemini.*image/,
@@ -1308,6 +1256,247 @@ async function requestChange2ProModelList(apiKey: string) {
   return { models }
 }
 
+function agnesModelsEndpoint(endpoint: string) {
+  const url = new URL(endpoint)
+  const versionIndex = url.pathname.indexOf('/v1')
+  url.pathname = `${versionIndex >= 0 ? url.pathname.slice(0, versionIndex) : ''}/v1/models`
+  url.search = ''
+  return url.toString()
+}
+
+async function requestAgnesModelList(apiKey: string, endpoint: string) {
+  if (!apiKey.trim()) throw new UpstreamHttpError('请先填写 Agnes AI API Key。', 400)
+  if (!endpoint.trim()) throw new UpstreamHttpError('请先填写 Agnes AI Endpoint。', 400)
+  const modelsEndpoint = agnesModelsEndpoint(endpoint.trim())
+
+  let response: Response
+  try {
+    response = await fetch(await validateUpstreamEndpoint(modelsEndpoint), {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey.trim()}` },
+    })
+  } catch (error) {
+    throw new Error(formatUpstreamFetchError(error, modelsEndpoint))
+  }
+
+  const text = await response.text()
+  const json = parseJsonLikeResponse(text)
+  if (!response.ok) {
+    const detail = knownErrorText(json)
+    throw new UpstreamHttpError(
+      detail
+        ? `Agnes AI 模型列表读取失败（${response.status}）：${detail}`
+        : `Agnes AI 模型列表读取失败（${response.status} ${response.statusText}）。`,
+      response.status,
+    )
+  }
+
+  const models = change2ProModelsFromResponse(json).filter((model) => /^agnes-image-/i.test(model.id))
+  if (!models.length) {
+    throw new UpstreamHttpError('当前 Agnes AI Key 没有返回可用的生图模型。', 400)
+  }
+  return { models }
+}
+
+async function requestAgnesImage(config: ApiConfig, prompt: string, referenceImageUrls: string[]) {
+  if (!config.apiKey?.trim()) throw new UpstreamHttpError('请先填写 Agnes AI API Key。', 400)
+
+  const payload: Record<string, unknown> = {
+    model: config.model,
+    prompt,
+    size: config.size,
+    n: 1,
+  }
+
+  if (referenceImageUrls.length) {
+    const images = await Promise.all(
+      referenceImageUrls.map(async (imageUrl, index) => {
+        const image = await loadImageBuffer(imageUrl)
+        validateReferenceImage(image, index)
+        return image.buffer.toString('base64')
+      }),
+    )
+    payload.extra_body = {
+      image: images,
+      response_format: 'b64_json',
+    }
+  }
+
+  return postJson(
+    config.endpoint.trim(),
+    { Authorization: `Bearer ${config.apiKey.trim()}` },
+    payload,
+  )
+}
+
+const apiMartModelConfigs: Record<
+  string,
+  { label: string; resolutions: ImageResolutionTier[]; defaultResolution: ImageResolutionTier; maxReferenceImages: number }
+> = {
+  'gemini-3-pro-image-preview': {
+    label: 'Nano Banana Pro',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 14,
+  },
+  'gemini-3.1-flash-image-preview': {
+    label: 'Nano Banana 2',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 14,
+  },
+  'gpt-image-2': {
+    label: 'GPT Image 2',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+  },
+  'seedream-5-0-pro': {
+    label: 'Seedream 5.0 Pro',
+    resolutions: ['1K', '1.5K', '2K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 10,
+  },
+  'seedream-5-0-lite': {
+    label: 'Seedream 5.0 Lite',
+    resolutions: ['2K', '3K', '4K'],
+    defaultResolution: '2K',
+    maxReferenceImages: 14,
+  },
+}
+
+function apiMartTaskEndpoint(generationEndpoint: string, taskId: string) {
+  const url = new URL(generationEndpoint)
+  const versionIndex = url.pathname.indexOf('/v1')
+  const basePath = versionIndex >= 0 ? url.pathname.slice(0, versionIndex) : ''
+  url.pathname = `${basePath}/v1/tasks/${encodeURIComponent(taskId)}`
+  url.search = ''
+  url.searchParams.set('language', 'zh')
+  return url.toString()
+}
+
+function apiMartTaskData(source: unknown) {
+  if (!source || typeof source !== 'object') return undefined
+  const root = source as Record<string, unknown>
+  return root.data && typeof root.data === 'object' && !Array.isArray(root.data)
+    ? (root.data as Record<string, unknown>)
+    : root
+}
+
+function apiMartTaskId(source: unknown) {
+  if (!source || typeof source !== 'object') return undefined
+  const root = source as Record<string, unknown>
+  const entries = Array.isArray(root.data) ? root.data : []
+  const first = entries[0]
+  if (first && typeof first === 'object') {
+    const taskId = stringValue(first as Record<string, unknown>, ['task_id', 'taskId', 'id'])
+    if (taskId) return taskId
+  }
+  return stringValue(root, ['task_id', 'taskId', 'id'])
+}
+
+function apiMartImageUrl(source: unknown) {
+  const task = apiMartTaskData(source)
+  if (!task) return undefined
+  const result = task.result && typeof task.result === 'object'
+    ? (task.result as Record<string, unknown>)
+    : task
+  const images = Array.isArray(result.images)
+    ? result.images
+    : Array.isArray(result.data)
+      ? result.data
+      : []
+
+  for (const image of images) {
+    if (typeof image === 'string' && image.trim()) return image
+    if (!image || typeof image !== 'object') continue
+    const item = image as Record<string, unknown>
+    const directUrl = stringValue(item, ['url', 'image_url', 'imageUrl'])
+    if (directUrl) return directUrl
+    const urls = Array.isArray(item.url) ? item.url : Array.isArray(item.urls) ? item.urls : []
+    const firstUrl = urls.find((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+    if (firstUrl) return firstUrl
+    const base64 = stringValue(item, ['b64_json', 'base64'])
+    if (base64) return base64.startsWith('data:image/') ? base64 : `data:image/png;base64,${base64}`
+  }
+
+  return stringValue(result, ['url', 'image_url', 'imageUrl'])
+}
+
+function apiMartTaskStatus(source: unknown) {
+  const task = apiMartTaskData(source)
+  return task ? stringValue(task, ['status', 'state'])?.toLowerCase() : undefined
+}
+
+function apiMartTaskError(source: unknown) {
+  const task = apiMartTaskData(source)
+  if (!task) return undefined
+  if (task.error && typeof task.error === 'object') return knownErrorText(task.error)
+  return knownErrorText(task)
+}
+
+function apiMartResolution(model: string, requested?: ImageResolutionTier) {
+  const modelConfig = apiMartModelConfigs[model]
+  if (!modelConfig) return requested || '1K'
+  const resolution = requested && modelConfig.resolutions.includes(requested)
+    ? requested
+    : modelConfig.defaultResolution
+  return model === 'gpt-image-2' ? resolution.toLowerCase() : resolution
+}
+
+async function requestApiMartImage(config: ApiConfig, prompt: string, referenceImageUrls: string[]) {
+  if (!config.apiKey?.trim()) throw new UpstreamHttpError('请先填写 API Mart API Key。', 400)
+  const modelConfig = apiMartModelConfigs[config.model]
+  if (!modelConfig) throw new UpstreamHttpError('当前 API Mart 模型不在网站内置的可选列表中。', 400)
+
+  const preparedImages = await prepareGrsAiReferenceImages(referenceImageUrls, modelConfig.maxReferenceImages)
+  const payload: Record<string, unknown> = {
+    model: config.model,
+    prompt,
+    size: aspectRatioFromSize(config.size),
+    resolution: apiMartResolution(config.model, config.imageSize),
+    n: 1,
+  }
+  if (preparedImages.length) payload.image_urls = preparedImages
+
+  const headers = { Authorization: `Bearer ${config.apiKey.trim()}` }
+  let created: unknown
+  try {
+    created = await postJson(config.endpoint.trim(), headers, payload)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'API Mart 请求失败'
+    const detail = `${message}（模型 ${modelConfig.label}，清晰度 ${String(payload.resolution)}，参考图 ${preparedImages.length} 张）`
+    if (error instanceof UpstreamHttpError) throw new UpstreamHttpError(detail, error.statusCode)
+    throw new Error(detail)
+  }
+
+  const directUrl = apiMartImageUrl(created)
+  if (directUrl) return { data: [{ url: directUrl }], apimart: created }
+
+  const taskId = apiMartTaskId(created)
+  if (!taskId) {
+    throw new Error(`API Mart 已响应，但没有返回任务 ID。响应：${compactJson(created)}`)
+  }
+
+  const taskEndpoint = apiMartTaskEndpoint(config.endpoint.trim(), taskId)
+  for (let index = 0; index < 120; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, index === 0 ? 1000 : 2500))
+    const result = await getJson(taskEndpoint, headers)
+    const imageUrl = apiMartImageUrl(result)
+    if (imageUrl) return { data: [{ url: imageUrl }], apimart: result }
+
+    const status = apiMartTaskStatus(result)
+    if (status === 'failed' || status === 'cancelled' || status === 'canceled') {
+      throw new Error(`API Mart 生成失败：${apiMartTaskError(result) || status}`)
+    }
+    if (status === 'completed') {
+      throw new Error('API Mart 任务已完成，但响应中没有找到图片地址。')
+    }
+  }
+
+  throw new Error(`API Mart 生成超时（任务 ${taskId}），请稍后重新生成。`)
+}
+
 async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string; referenceImageUrl?: string; referenceImageUrls?: string[]; maskUrl?: string }) {
   const config = body.config
   const prompt = body.prompt?.trim()
@@ -1319,8 +1508,11 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
   if (!prompt) throw new Error('缺少提示词')
   if (config.mode === 'mock') throw new Error('当前仍是本地模拟模式，请切换到 OpenAI 或自定义 API')
   if (!config.endpoint?.trim()) throw new Error('请先填写 API Endpoint')
-  if (config.mode === 'volcengine') {
-    return requestVolcengineSeedreamImage(config, prompt, referenceImageUrls, body.maskUrl)
+  if (config.mode === 'agnes') {
+    return requestAgnesImage(config, prompt, referenceImageUrls)
+  }
+  if (config.mode === 'apimart') {
+    return requestApiMartImage(config, prompt, referenceImageUrls)
   }
   if (config.mode === 'change2pro' && isChange2ProGeminiImageModel(config.model)) {
     return requestChange2ProGeminiImage(config, prompt, referenceImageUrls, body.maskUrl)
@@ -1393,6 +1585,27 @@ function localImageLibraryPlugin(): Plugin {
           const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
           sendJson(res, statusCode, {
             error: error instanceof Error ? error.message : 'Change2Pro 模型列表读取失败',
+          })
+        }
+      })
+
+      server.middlewares.use('/api/agnes/models', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') {
+          next()
+          return
+        }
+
+        try {
+          const body = JSON.parse(await readBody(req)) as { apiKey?: string; endpoint?: string }
+          const result = await requestAgnesModelList(
+            body.apiKey || '',
+            body.endpoint || 'https://api.agnes-ai.cn/v1/images/generations',
+          )
+          sendJson(res, 200, result)
+        } catch (error) {
+          const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
+          sendJson(res, statusCode, {
+            error: error instanceof Error ? error.message : 'Agnes AI 模型列表读取失败',
           })
         }
       })

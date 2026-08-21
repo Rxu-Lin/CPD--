@@ -146,9 +146,9 @@ function repaintPromptBody(prompt: string) {
 function repaintPromptWithColor(prompt: string, brushColor: RepaintBrushColor) {
   return `${repaintBrushOptions[brushColor].prefix}${repaintPromptBody(prompt)}`
 }
-type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'volcengine' | 'custom'
+type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'agnes' | 'apimart' | 'custom'
 type AspectRatioValue = '16:9' | '3:2' | '4:3' | '1:1' | '3:4' | '2:3' | '9:16'
-type ImageResolutionTier = '1K' | '2K' | '4K'
+type ImageResolutionTier = '1K' | '1.5K' | '2K' | '3K' | '4K'
 type Change2ProApiFamily = 'image2' | 'nanoBanana'
 
 type ApiConfig = {
@@ -166,6 +166,13 @@ type ApiConfig = {
 type Change2ProModelOption = {
   id: string
   ownedBy?: string
+}
+
+type ApiMartModelOption = {
+  id: string
+  label: string
+  resolutions: ImageResolutionTier[]
+  defaultResolution: ImageResolutionTier
 }
 
 type GenerationRecord = {
@@ -365,17 +372,69 @@ const change2ProApiConfig: Partial<ApiConfig> = {
   change2ProFamily: 'image2',
 }
 
-const volcengineApiConfig: Partial<ApiConfig> = {
-  mode: 'volcengine',
-  endpoint: 'https://ark.cn-beijing.volces.com/api/v3/images/generations',
-  model: 'doubao-seedream-5-0-260128',
-  imageSize: '2K',
-  bodyTemplate: '{\n  "model": "{model}",\n  "prompt": "{prompt}",\n  "size": "{size}",\n  "sequential_image_generation": "disabled",\n  "response_format": "url",\n  "watermark": false\n}',
+const agnesApiConfig: Partial<ApiConfig> = {
+  mode: 'agnes',
+  endpoint: 'https://api.agnes-ai.cn/v1/images/generations',
+  model: 'agnes-image-2.1-flash',
+  imageSize: '1K',
   responsePath: 'data.0.url',
 }
 
+const apiMartApiConfig: Partial<ApiConfig> = {
+  mode: 'apimart',
+  endpoint: 'https://api.apimart.ai/v1/images/generations',
+  model: 'gemini-3-pro-image-preview',
+  imageSize: '1K',
+  responsePath: 'data.0.url',
+}
+
+const apiMartModels: ApiMartModelOption[] = [
+  {
+    id: 'gemini-3-pro-image-preview',
+    label: 'Nano Banana Pro',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+  },
+  {
+    id: 'gemini-3.1-flash-image-preview',
+    label: 'Nano Banana 2',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+  },
+  {
+    id: 'gpt-image-2',
+    label: 'GPT Image 2',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+  },
+  {
+    id: 'seedream-5-0-pro',
+    label: 'Seedream 5.0 Pro',
+    resolutions: ['1K', '1.5K', '2K'],
+    defaultResolution: '1K',
+  },
+  {
+    id: 'seedream-5-0-lite',
+    label: 'Seedream 5.0 Lite',
+    resolutions: ['2K', '3K', '4K'],
+    defaultResolution: '2K',
+  },
+]
+
+function findApiMartModel(model: string) {
+  return apiMartModels.find((option) => option.id === model) ?? apiMartModels[0]
+}
+
+const agnesFallbackModels: Change2ProModelOption[] = [
+  { id: 'agnes-image-2.1-flash', ownedBy: 'Agnes AI' },
+  { id: 'agnes-image-2.0-flash', ownedBy: 'Agnes AI' },
+]
+
 function apiModelDisplayName(model: string) {
-  if (model === 'doubao-seedream-5-0-260128') return 'Doubao Seedream 5.0 Pro'
+  if (model === 'agnes-image-2.1-flash') return 'Agnes Image 2.1 Flash'
+  if (model === 'agnes-image-2.0-flash') return 'Agnes Image 2.0 Flash'
+  const apiMartModel = apiMartModels.find((option) => option.id === model)
+  if (apiMartModel) return apiMartModel.label
   return findGrsAiModel(model)?.label || model
 }
 
@@ -430,7 +489,8 @@ function readStoredApiProfile(mode: ApiMode) {
 function apiModePreset(mode: ApiMode): Partial<ApiConfig> {
   if (mode === 'grsai') return grsAiApiConfig
   if (mode === 'change2pro') return change2ProApiConfig
-  if (mode === 'volcengine') return volcengineApiConfig
+  if (mode === 'agnes') return agnesApiConfig
+  if (mode === 'apimart') return apiMartApiConfig
   if (mode === 'openai') return { mode, endpoint: defaultApiConfig.endpoint, model: defaultApiConfig.model }
   if (mode === 'custom') return { mode, endpoint: '', model: '', responsePath: 'data.0.url' }
   return { ...defaultApiConfig, mode: 'mock' }
@@ -625,8 +685,13 @@ function getAbsoluteNodePosition(node: WorkflowNode, nodeValues: WorkflowNode[])
 
 function readStoredApiConfig() {
   try {
+    window.localStorage.removeItem(`${API_PROFILE_STORAGE_KEY_PREFIX}volcengine`)
     const saved = window.localStorage.getItem(API_STORAGE_KEY)
     const config = saved ? { ...defaultApiConfig, ...JSON.parse(saved) } : defaultApiConfig
+    if (config.mode === 'volcengine') {
+      window.localStorage.removeItem(API_STORAGE_KEY)
+      return defaultApiConfig
+    }
     if (config.mode === 'grsai') {
       return {
         ...config,
@@ -638,6 +703,15 @@ function readStoredApiConfig() {
       return {
         ...config,
         change2ProFamily: config.change2ProFamily || change2ProFamilyFromModel(config.model),
+      }
+    }
+    if (config.mode === 'apimart') {
+      const model = findApiMartModel(config.model)
+      return {
+        ...config,
+        endpoint: config.endpoint || apiMartApiConfig.endpoint || '',
+        model: model.id,
+        imageSize: model.resolutions.includes(config.imageSize) ? config.imageSize : model.defaultResolution,
       }
     }
     return config.apiKey?.trim() && config.mode === 'mock' ? { ...config, mode: 'openai' as const } : config
@@ -1014,6 +1088,23 @@ async function requestChange2ProModels(apiKey: string) {
     throw new Error(payload?.error || `模型列表读取失败：${response.status} ${response.statusText}`)
   }
   if (!payload?.models?.length) throw new Error('当前 Key 没有返回可识别的生图模型。')
+  return payload.models
+}
+
+async function requestAgnesModels(apiKey: string, endpoint: string) {
+  const response = await fetch('/api/agnes/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey, endpoint }),
+  })
+  const payload = (await response.json().catch(() => null)) as
+    | { models?: Change2ProModelOption[]; error?: string }
+    | null
+
+  if (!response.ok) {
+    throw new Error(payload?.error || `Agnes AI 模型列表读取失败：${response.status} ${response.statusText}`)
+  }
+  if (!payload?.models?.length) throw new Error('当前 Agnes AI Key 没有返回可用的生图模型。')
   return payload.models
 }
 
@@ -1966,6 +2057,10 @@ export default function App() {
   const [change2ProModelStatus, setChange2ProModelStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [change2ProModelMessage, setChange2ProModelMessage] = useState('')
   const change2ProModelRequestIdRef = useRef(0)
+  const [agnesModels, setAgnesModels] = useState<Change2ProModelOption[]>(agnesFallbackModels)
+  const [agnesModelStatus, setAgnesModelStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [agnesModelMessage, setAgnesModelMessage] = useState('')
+  const agnesModelRequestIdRef = useRef(0)
   const [history, setHistory] = useState<GenerationRecord[]>([])
   const [isExporting, setIsExporting] = useState(false)
   const [isProjectSaving, setIsProjectSaving] = useState(false)
@@ -1975,6 +2070,13 @@ export default function App() {
   const [welcomeTitleIndex, setWelcomeTitleIndex] = useState(0)
 
   const markDirty = useCallback(() => setDirty(true), [])
+
+  useEffect(() => {
+    window.localStorage.removeItem(`${API_PROFILE_STORAGE_KEY_PREFIX}volcengine`)
+    if (String(apiConfig.mode) !== 'volcengine') return
+    window.localStorage.removeItem(API_STORAGE_KEY)
+    setApiConfig(defaultApiConfig)
+  }, [apiConfig.mode])
 
   const loadChange2ProModels = useCallback(async () => {
     const apiKey = apiConfig.apiKey.trim()
@@ -2020,6 +2122,43 @@ export default function App() {
     }
   }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.model])
 
+  const loadAgnesModels = useCallback(async () => {
+    const apiKey = apiConfig.apiKey.trim()
+    const endpoint = apiConfig.endpoint.trim()
+    if (!apiKey) {
+      setAgnesModels(agnesFallbackModels)
+      setAgnesModelStatus('idle')
+      setAgnesModelMessage('填写 Agnes AI API Key 后可读取当前账号实际可用的生图模型。')
+      return
+    }
+
+    const requestId = agnesModelRequestIdRef.current + 1
+    agnesModelRequestIdRef.current = requestId
+    setAgnesModelStatus('loading')
+    setAgnesModelMessage('正在读取 Agnes AI 生图模型…')
+
+    try {
+      const models = await requestAgnesModels(apiKey, endpoint)
+      if (agnesModelRequestIdRef.current !== requestId) return
+      setAgnesModels(models)
+      setAgnesModelStatus('success')
+      setAgnesModelMessage(`已读取 ${models.length} 个 Agnes AI 生图模型。`)
+      setApiConfig((current) => {
+        if (current.mode !== 'agnes' || current.apiKey.trim() !== apiKey || current.endpoint.trim() !== endpoint) return current
+        if (models.some((model) => model.id === current.model)) return current
+        const next = { ...current, model: models[0].id }
+        window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
+        window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
+        return next
+      })
+    } catch (error) {
+      if (agnesModelRequestIdRef.current !== requestId) return
+      setAgnesModels(agnesFallbackModels)
+      setAgnesModelStatus('error')
+      setAgnesModelMessage(error instanceof Error ? error.message : 'Agnes AI 模型列表读取失败。')
+    }
+  }, [apiConfig.apiKey, apiConfig.endpoint])
+
   useEffect(() => {
     setEdges((current) => normalizeImageInputEdges(current, nodes))
   }, [nodes, setEdges])
@@ -2052,6 +2191,21 @@ export default function App() {
     }, 500)
     return () => window.clearTimeout(timer)
   }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.mode, loadChange2ProModels, showSettings])
+
+  useEffect(() => {
+    if (!showSettings || apiConfig.mode !== 'agnes') return
+    if (apiConfig.apiKey.trim().length < 8) {
+      setAgnesModels(agnesFallbackModels)
+      setAgnesModelStatus('idle')
+      setAgnesModelMessage('填写 Agnes AI API Key 后将自动读取生图模型。')
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      void loadAgnesModels()
+    }, 500)
+    return () => window.clearTimeout(timer)
+  }, [apiConfig.apiKey, apiConfig.endpoint, apiConfig.mode, loadAgnesModels, showSettings])
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<WorkflowNode>[]) => {
@@ -3845,6 +3999,15 @@ export default function App() {
           change2ProFamily: next.change2ProFamily || change2ProFamilyFromModel(next.model),
         }
       }
+      if (next.mode === 'apimart') {
+        const model = findApiMartModel(next.model)
+        next = {
+          ...next,
+          endpoint: next.endpoint || apiMartApiConfig.endpoint || '',
+          model: model.id,
+          imageSize: model.resolutions.includes(next.imageSize) ? next.imageSize : model.defaultResolution,
+        }
+      }
 
       window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
       window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
@@ -4424,7 +4587,7 @@ export default function App() {
             <div className="modal-head">
               <div>
                 <h2>API 设置</h2>
-                <p>支持火山方舟、OpenAI 兼容图像接口，也可以接自己的 JSON API。</p>
+                <p>支持 API Mart、Agnes AI、OpenAI 兼容图像接口，也可以接自己的 JSON API。</p>
               </div>
               <button type="button" onClick={() => setShowSettings(false)} title="关闭">
                 <X size={18} />
@@ -4437,7 +4600,8 @@ export default function App() {
                 <select value={apiConfig.mode} onChange={(event) => updateApiConfig({ mode: event.target.value as ApiMode })}>
                   <option value="grsai">GA 全部生图模型</option>
                   <option value="change2pro">Change2Pro 生图模型</option>
-                  <option value="volcengine">火山方舟 · Seedream 5.0 Pro</option>
+                  <option value="agnes">Agnes AI 生图模型</option>
+                  <option value="apimart">API Mart 生图模型</option>
                   <option value="mock">本地模拟</option>
                   <option value="openai">OpenAI 兼容</option>
                   <option value="custom">自定义 JSON API</option>
@@ -4533,17 +4697,68 @@ export default function App() {
                       </div>
                     )}
                   </>
-                ) : apiConfig.mode === 'volcengine' ? (
+                ) : apiConfig.mode === 'agnes' ? (
                   <>
-                    <input
-                      aria-label="火山方舟模型或推理接入点"
-                      value={apiConfig.model}
-                      onChange={(event) => updateApiConfig({ model: event.target.value })}
-                      placeholder="doubao-seedream-5-0-260128 或 ep-..."
-                    />
-                    <small className="api-field-help">
-                      已预设 Doubao Seedream 5.0 Pro 的正式模型 ID；也可填写方舟控制台创建的推理接入点 ID（ep-...）。
+                    <div className="change2pro-model-picker">
+                      <select
+                        aria-label="Agnes AI 生图模型"
+                        value={apiConfig.model}
+                        onChange={(event) => updateApiConfig({ model: event.target.value })}
+                        disabled={agnesModelStatus === 'loading'}
+                      >
+                        {agnesModels.map((model) => (
+                          <option key={model.id} value={model.id}>{apiModelDisplayName(model.id)}</option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => void loadAgnesModels()}
+                        disabled={!apiConfig.apiKey.trim() || agnesModelStatus === 'loading'}
+                      >
+                        {agnesModelStatus === 'loading' && <Loader2 size={13} />}
+                        {agnesModelStatus === 'loading' ? '读取中' : '读取模型'}
+                      </button>
+                    </div>
+                    <small className={`change2pro-model-message ${agnesModelStatus}`}>
+                      {agnesModelMessage || '官方生图模型：Agnes Image 2.1 Flash、Agnes Image 2.0 Flash。'}
                     </small>
+                  </>
+                ) : apiConfig.mode === 'apimart' ? (
+                  <>
+                    <select
+                      aria-label="API Mart 生图模型"
+                      value={apiConfig.model}
+                      onChange={(event) => {
+                        const model = findApiMartModel(event.target.value)
+                        updateApiConfig({ model: model.id, imageSize: model.defaultResolution })
+                      }}
+                    >
+                      {apiMartModels.map((model) => (
+                        <option key={model.id} value={model.id}>{model.label}</option>
+                      ))}
+                    </select>
+                    <small className="change2pro-model-message success">
+                      已内置 5 个 API Mart 生图模型，生成任务会自动等待并读取最终图片。
+                    </small>
+                    <div className="change2pro-resolution-section">
+                      <div className="change2pro-resolution-head">
+                        <span>输出清晰度</span>
+                        <small>已按当前模型过滤可用档位</small>
+                      </div>
+                      <div className="change2pro-resolution-picker" role="group" aria-label="API Mart 输出清晰度">
+                        {findApiMartModel(apiConfig.model).resolutions.map((imageSize) => (
+                          <button
+                            className={apiConfig.imageSize === imageSize ? 'active' : ''}
+                            type="button"
+                            aria-pressed={apiConfig.imageSize === imageSize}
+                            onClick={() => updateApiConfig({ imageSize })}
+                            key={imageSize}
+                          >
+                            {imageSize}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </>
                 ) : (
                   <input aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })} />
