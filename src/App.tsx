@@ -51,6 +51,7 @@ import {
   Trash2,
   Upload,
   UploadCloud,
+  Video,
   Wand2,
   Workflow as WorkflowIcon,
   X,
@@ -74,7 +75,7 @@ import {
 
 const Model3DStudio = lazy(() => import('./Model3DStudio'))
 
-type NodeKind = 'prompt' | 'image' | 'reference' | 'repaint' | 'outpaint' | 'group'
+type NodeKind = 'prompt' | 'image' | 'video' | 'reference' | 'repaint' | 'outpaint' | 'group'
 type NodeStatus = 'idle' | 'generating' | 'done' | 'error'
 type RepaintBrushColor = 'red' | 'blue'
 type OutpaintInsets = { top: number; right: number; bottom: number; left: number }
@@ -149,6 +150,7 @@ function repaintPromptWithColor(prompt: string, brushColor: RepaintBrushColor) {
 type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'agnes' | 'apimart' | 'custom'
 type AspectRatioValue = '16:9' | '3:2' | '4:3' | '1:1' | '3:4' | '2:3' | '9:16'
 type ImageResolutionTier = '1K' | '1.5K' | '2K' | '3K' | '4K'
+type VideoResolutionTier = '480p' | '720p' | '768P' | '1080p' | '2K' | '4k'
 type Change2ProApiFamily = 'image2' | 'nanoBanana'
 
 type ApiConfig = {
@@ -157,6 +159,9 @@ type ApiConfig = {
   apiKey: string
   model: string
   imageSize: ImageResolutionTier
+  videoModel: string
+  videoResolution: VideoResolutionTier
+  videoDuration: number
   size: string
   bodyTemplate: string
   responsePath: string
@@ -173,6 +178,16 @@ type ApiMartModelOption = {
   label: string
   resolutions: ImageResolutionTier[]
   defaultResolution: ImageResolutionTier
+}
+
+type ApiMartVideoModelOption = {
+  id: string
+  label: string
+  resolutions: VideoResolutionTier[]
+  defaultResolution: VideoResolutionTier
+  minDuration: number
+  maxDuration: number
+  defaultDuration: number
 }
 
 type GenerationRecord = {
@@ -200,6 +215,7 @@ type WorkflowNodeData = {
   title: string
   prompt?: string
   imageUrl?: string
+  videoUrl?: string
   sourceImageUrl?: string
   maskUrl?: string
   brushSize?: number
@@ -257,7 +273,9 @@ function isImageInputHandle(handleId?: string | null) {
 }
 
 function normalizeImageInputEdges(edgeValues: Edge[], nodeValues: WorkflowNode[]) {
-  const imageTargetIds = nodeValues.filter((node) => node.data.kind === 'image').map((node) => node.id)
+  const imageTargetIds = nodeValues
+    .filter((node) => node.data.kind === 'image' || node.data.kind === 'video')
+    .map((node) => node.id)
   const sourceKindById = new Map(nodeValues.map((node) => [node.id, node.data.kind]))
   const normalizedEdges = edgeValues.map((edge) => ({ ...edge }))
   let changed = false
@@ -351,6 +369,9 @@ const defaultApiConfig: ApiConfig = {
   apiKey: '',
   model: 'gpt-image-1',
   imageSize: '1K',
+  videoModel: 'seedance-2.5',
+  videoResolution: '720p',
+  videoDuration: 5,
   size: '1024x1024',
   bodyTemplate: '{\n  "model": "{model}",\n  "prompt": "{prompt}",\n  "size": "{size}",\n  "n": 1\n}',
   responsePath: 'data.0.url',
@@ -385,6 +406,9 @@ const apiMartApiConfig: Partial<ApiConfig> = {
   endpoint: 'https://api.apimart.ai/v1/images/generations',
   model: 'gemini-3-pro-image-preview',
   imageSize: '1K',
+  videoModel: 'seedance-2.5',
+  videoResolution: '720p',
+  videoDuration: 5,
   responsePath: 'data.0.url',
 }
 
@@ -421,8 +445,42 @@ const apiMartModels: ApiMartModelOption[] = [
   },
 ]
 
+const apiMartVideoModels: ApiMartVideoModelOption[] = [
+  {
+    id: 'seedance-2.5',
+    label: 'Seedance 2.5',
+    resolutions: ['480p', '720p', '1080p'],
+    defaultResolution: '720p',
+    minDuration: 4,
+    maxDuration: 30,
+    defaultDuration: 5,
+  },
+  {
+    id: 'seedance-2.0',
+    label: 'Seedance 2.0',
+    resolutions: ['480p', '720p', '1080p', '4k'],
+    defaultResolution: '720p',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+  },
+  {
+    id: 'MiniMax-H3',
+    label: 'MiniMax H3',
+    resolutions: ['768P', '2K'],
+    defaultResolution: '2K',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+  },
+]
+
 function findApiMartModel(model: string) {
   return apiMartModels.find((option) => option.id === model) ?? apiMartModels[0]
+}
+
+function findApiMartVideoModel(model?: string) {
+  return apiMartVideoModels.find((option) => option.id === model) ?? apiMartVideoModels[0]
 }
 
 const agnesFallbackModels: Change2ProModelOption[] = [
@@ -435,6 +493,8 @@ function apiModelDisplayName(model: string) {
   if (model === 'agnes-image-2.0-flash') return 'Agnes Image 2.0 Flash'
   const apiMartModel = apiMartModels.find((option) => option.id === model)
   if (apiMartModel) return apiMartModel.label
+  const apiMartVideoModel = apiMartVideoModels.find((option) => option.id === model)
+  if (apiMartVideoModel) return apiMartVideoModel.label
   return findGrsAiModel(model)?.label || model
 }
 
@@ -619,13 +679,11 @@ function getReferenceImageRatio(width: number, height: number) {
   ).label
 }
 
-const welcomeTitles = [
-  '你好，欢迎来到JUG无限画布',
-  'CPD专属开发，尽情发挥你的创意',
-] as const
-
 const starterPrompt =
   '一张未来感产品海报，深色背景，蓝色霓虹边缘光，主体是一台半透明的智能设备，电影级布光，高细节'
+
+const productRetouchPrompt =
+  '对原图中的美妆产品进行商业广告级精修，保持产品外形、包装结构、品牌标识、文字内容和真实颜色准确不变。清除灰尘、指纹、划痕、污渍、毛边及包装瑕疵，优化瓶身、管身或膏体表面的质感与细节；校正透视和边缘，使轮廓清晰自然。重塑专业棚拍光影，增强玻璃、金属、塑料、磨砂或膏体材质的真实表现，控制高光不过曝、阴影柔和有层次。提升画面通透度、色彩纯净度和局部对比度，避免过度锐化、塑料感及不真实反光。背景保持干净高级，并增加自然接触阴影与轻微环境反射，使产品稳定落地。整体呈现高端美妆品牌广告风格，精致、纯净、真实、具有购买吸引力，超高清细节，适用于电商主图、海报和社交媒体宣传。禁止改变产品比例、Logo、包装文字、色号、材质和核心设计，不添加不存在的装饰或配件。'
 
 function id(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -658,8 +716,8 @@ function numericNodeDimension(value: unknown) {
 }
 
 function getWorkflowNodeSize(node: WorkflowNode) {
-  const fallbackWidth = node.data.kind === 'outpaint' ? 410 : node.data.kind === 'repaint' ? 360 : node.data.kind === 'image' || node.data.kind === 'prompt' ? 330 : 312
-  const fallbackHeight = node.data.kind === 'outpaint' ? 780 : node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' ? 480 : node.data.kind === 'reference' ? 360 : 250
+  const fallbackWidth = node.data.kind === 'outpaint' ? 410 : node.data.kind === 'repaint' ? 360 : node.data.kind === 'image' || node.data.kind === 'video' || node.data.kind === 'prompt' ? 330 : 312
+  const fallbackHeight = node.data.kind === 'outpaint' ? 780 : node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' || node.data.kind === 'video' ? 480 : node.data.kind === 'reference' ? 360 : 250
   return {
     width: node.measured?.width || node.width || numericNodeDimension(node.style?.width) || fallbackWidth,
     height: node.measured?.height || node.height || numericNodeDimension(node.style?.height) || fallbackHeight,
@@ -707,11 +765,20 @@ function readStoredApiConfig() {
     }
     if (config.mode === 'apimart') {
       const model = findApiMartModel(config.model)
+      const videoModel = findApiMartVideoModel(config.videoModel)
+      const requestedDuration = Number(config.videoDuration)
       return {
         ...config,
         endpoint: config.endpoint || apiMartApiConfig.endpoint || '',
         model: model.id,
         imageSize: model.resolutions.includes(config.imageSize) ? config.imageSize : model.defaultResolution,
+        videoModel: videoModel.id,
+        videoResolution: videoModel.resolutions.includes(config.videoResolution)
+          ? config.videoResolution
+          : videoModel.defaultResolution,
+        videoDuration: Number.isFinite(requestedDuration)
+          ? Math.min(videoModel.maxDuration, Math.max(videoModel.minDuration, Math.round(requestedDuration)))
+          : videoModel.defaultDuration,
       }
     }
     return config.apiKey?.trim() && config.mode === 'mock' ? { ...config, mode: 'openai' as const } : config
@@ -1072,6 +1139,34 @@ async function requestGeneratedImage(prompt: string, config: ApiConfig, referenc
   }
 
   return imageFromResponse(json, config.responsePath)
+}
+
+function videoFromResponse(source: unknown) {
+  const candidates = [
+    getValueByPath(source, 'data.0.url'),
+    getValueByPath(source, 'data.url'),
+    getValueByPath(source, 'url'),
+    getValueByPath(source, 'video_url'),
+  ]
+  const value = candidates.find((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+  if (!value) throw new Error('接口响应中没有找到视频地址。')
+  return value
+}
+
+async function requestGeneratedVideo(prompt: string, config: ApiConfig, referenceImageUrls: string[] = []) {
+  const response = await fetch('/api/videos/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, config, referenceImageUrls }),
+  })
+
+  const json = await response.json().catch(() => null)
+  if (!response.ok) {
+    const message = typeof json?.error === 'string' ? json.error : `请求失败：${response.status} ${response.statusText}`
+    throw new Error(message)
+  }
+
+  return videoFromResponse(json)
 }
 
 async function requestChange2ProModels(apiKey: string) {
@@ -1555,6 +1650,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const [referenceImageRatio, setReferenceImageRatio] = useState('—')
   const [referencePixelSize, setReferencePixelSize] = useState('')
   const isImage = data.kind === 'image'
+  const isVideo = data.kind === 'video'
   const isPrompt = data.kind === 'prompt'
   const isReference = data.kind === 'reference'
   const isRepaint = data.kind === 'repaint'
@@ -1573,10 +1669,10 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const configuredModelName = data.model?.trim() || ''
   const nodeTitle = isReference
     ? (data.sourceName || data.title)
-    : isImage
+    : isImage || isVideo
       ? (apiModelDisplayName(configuredModelName) || data.title)
       : data.title
-  const imageInputSlots = isImage
+  const imageInputSlots = isImage || isVideo
     ? data.imageInputSlots?.length
       ? data.imageInputSlots
       : [{ id: `${imageInputHandlePrefix}1`, index: 1, connected: false }]
@@ -1631,10 +1727,10 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
   return (
     <div className={`workflow-node ${selected ? 'selected' : ''} ${data.kind}`}>
-      {(isImage || isRepaint || isOutpaint) && (
+      {(isImage || isVideo || isRepaint || isOutpaint) && (
         <>
           {imageInputSlots.map((slot, index) => {
-            const label = isImage ? `Image ${slot.index}` : 'Image'
+            const label = isImage || isVideo ? `Image ${slot.index}` : 'Image'
             const top = inputPortTop(index)
             return [
               <span key={`${slot.id}-label`} className="node-port-label image-input-label" style={{ top }} aria-hidden="true">
@@ -1682,6 +1778,8 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             <Expand size={15} />
           ) : isImage ? (
             <ImageIcon size={15} />
+          ) : isVideo ? (
+            <Video size={15} />
           ) : isReference ? (
             <UploadCloud size={15} />
           ) : (
@@ -1689,7 +1787,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           )}
           <span
             className={isReference ? 'reference-file-title' : undefined}
-            title={(isReference || isImage) ? nodeTitle : undefined}
+            title={(isReference || isImage || isVideo) ? nodeTitle : undefined}
           >
             {nodeTitle}
           </span>
@@ -1702,7 +1800,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           >
             {referenceImageRatio}
           </div>
-        ) : (isImage || isRepaint || isOutpaint) ? (
+        ) : (isImage || isVideo || isRepaint || isOutpaint) ? (
           <button
             className="node-delete-button nodrag nopan"
             type="button"
@@ -1793,6 +1891,38 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
         )
       )}
 
+      {isVideo && (
+        data.videoUrl && !isGenerating ? (
+          <video
+            className="node-video nodrag nopan nowheel"
+            src={data.videoUrl}
+            controls
+            playsInline
+            preload="metadata"
+            style={{ aspectRatio: selectedAspectRatio.cssRatio }}
+          />
+        ) : (
+          <div
+            className={`node-empty node-video-empty ${isGenerating ? 'generating' : ''}`}
+            style={{ aspectRatio: selectedAspectRatio.cssRatio }}
+            aria-live="polite"
+          >
+            {isGenerating ? (
+              <div className="node-generation-field" role="status" aria-label="正在生成视频">
+                <span className="node-generation-frame" aria-hidden="true" />
+                <span className="node-generation-copy">正在生成视频...</span>
+              </div>
+            ) : (
+              <>
+                <Video size={30} />
+                <span>等待视频</span>
+                <small>连接提示词与参考图后运行</small>
+              </>
+            )}
+          </div>
+        )
+      )}
+
       {isRepaint && (
         <>
           <RepaintMaskEditor
@@ -1858,7 +1988,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
       {data.error && <div className="node-error">{data.error}</div>}
 
-      {(isImage || isRepaint) && (
+      {(isImage || isVideo || isRepaint) && (
         <div className="aspect-ratio-control nodrag nopan" aria-label="尺寸比例">
           <div className="aspect-ratio-heading">
             <span>尺寸比例</span>
@@ -1926,12 +2056,12 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 <FolderOpen size={14} />
               </button>
             )}
-            {(isImage || isRepaint || isOutpaint) ? (
+            {(isImage || isVideo || isRepaint || isOutpaint) ? (
               <button
                 className="node-run-button nodrag nopan"
                 type="button"
-                title={isGenerating ? '正在生成' : isRepaint ? '运行重绘' : isOutpaint ? '运行扩图' : '运行生成'}
-                aria-label={isGenerating ? '正在生成' : isRepaint ? '运行重绘' : isOutpaint ? '运行扩图' : '运行生成'}
+                title={isGenerating ? '正在生成' : isVideo ? '运行视频生成' : isRepaint ? '运行重绘' : isOutpaint ? '运行扩图' : '运行生成'}
+                aria-label={isGenerating ? '正在生成' : isVideo ? '运行视频生成' : isRepaint ? '运行重绘' : isOutpaint ? '运行扩图' : '运行生成'}
                 onClick={() => data.onGenerate?.(nodeId)}
                 disabled={isGenerating}
               >
@@ -1950,11 +2080,13 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
         type="source"
         position={Position.Right}
         className={`node-handle output-handle ${data.outputConnected ? 'connected' : ''}`}
-        aria-label={isPrompt ? 'Prompt 输出' : 'Image 输出'}
+        aria-label={isPrompt ? 'Prompt 输出' : isVideo ? 'Video 输出' : 'Image 输出'}
         title={
           isReference
             ? '向右拖出生成图像框'
-            : isImage
+            : isVideo
+              ? '视频生成完成后可连接到后续视频节点'
+              : isImage
               ? '向右拖出重绘生成节点'
               : isRepaint
                 ? '重绘完成后向右拖出生成图像框'
@@ -2066,8 +2198,6 @@ export default function App() {
   const [isProjectSaving, setIsProjectSaving] = useState(false)
   const [openedProjectFileName, setOpenedProjectFileName] = useState('')
   const [, setToast] = useState('已准备好，默认使用本地模拟生成。')
-  const [welcomeDismissed, setWelcomeDismissed] = useState(false)
-  const [welcomeTitleIndex, setWelcomeTitleIndex] = useState(0)
 
   const markDirty = useCallback(() => setDirty(true), [])
 
@@ -2164,20 +2294,6 @@ export default function App() {
   }, [nodes, setEdges])
 
   useEffect(() => {
-    if (nodes.length > 0) setWelcomeDismissed(true)
-  }, [nodes.length])
-
-  useEffect(() => {
-    if (welcomeDismissed || nodes.length > 0) return
-
-    const interval = window.setInterval(() => {
-      setWelcomeTitleIndex((current) => (current + 1) % welcomeTitles.length)
-    }, 8000)
-
-    return () => window.clearInterval(interval)
-  }, [nodes.length, welcomeDismissed])
-
-  useEffect(() => {
     if (!showSettings || apiConfig.mode !== 'change2pro') return
     if (apiConfig.apiKey.trim().length < 8) {
       setChange2ProModels([])
@@ -2229,7 +2345,7 @@ export default function App() {
       const targetNode = nodes.find((node) => node.id === connection.target)
       const targetsImageInput = isImageInputHandle(connection.targetHandle)
 
-      if (targetNode?.data.kind === 'image' || targetNode?.data.kind === 'repaint' || targetNode?.data.kind === 'outpaint') {
+      if (targetNode?.data.kind === 'image' || targetNode?.data.kind === 'video' || targetNode?.data.kind === 'repaint' || targetNode?.data.kind === 'outpaint') {
         if (targetsImageInput && sourceNode?.data.kind === 'prompt') {
           setToast('提示词节点请连接到 Prompt 输入。')
           return
@@ -2884,7 +3000,7 @@ export default function App() {
       const clientPosition = { x: event.clientX, y: event.clientY }
       const menuPosition = {
         x: Math.min(clientPosition.x, window.innerWidth - 210),
-        y: Math.min(clientPosition.y, window.innerHeight - 176),
+        y: Math.min(clientPosition.y, window.innerHeight - 216),
       }
       const flowPosition =
         flowInstance?.screenToFlowPosition(clientPosition, {
@@ -2929,9 +3045,10 @@ export default function App() {
       imageInputEdges.map((edge, index) => imageInputHandleIndex(edge.targetHandle) ?? index + 1),
     )
     const highestConnectedImageIndex = Math.max(0, ...connectedImageIndexes)
-    const visibleImageSlotCount = node.data.kind === 'image' ? Math.max(1, highestConnectedImageIndex + 1) : 1
+    const usesOrderedImageSlots = node.data.kind === 'image' || node.data.kind === 'video'
+    const visibleImageSlotCount = usesOrderedImageSlots ? Math.max(1, highestConnectedImageIndex + 1) : 1
     const imageInputSlots = Array.from({ length: visibleImageSlotCount }, (_, index) => ({
-      id: node.data.kind === 'image' ? `${imageInputHandlePrefix}${index + 1}` : 'image',
+      id: usesOrderedImageSlots ? `${imageInputHandlePrefix}${index + 1}` : 'image',
       index: index + 1,
       connected: connectedImageIndexes.has(index + 1),
     }))
@@ -2940,7 +3057,11 @@ export default function App() {
       ...node,
       data: {
         ...node.data,
-        model: (node.data.kind === 'image' || node.data.kind === 'repaint' || node.data.kind === 'outpaint') ? apiConfig.model : node.data.model,
+        model: node.data.kind === 'video'
+          ? apiConfig.videoModel
+          : (node.data.kind === 'image' || node.data.kind === 'repaint' || node.data.kind === 'outpaint')
+            ? apiConfig.model
+            : node.data.model,
         promptInputConnected,
         imageInputConnected: imageInputEdges.length > 0,
         imageInputSlots,
@@ -3190,6 +3311,89 @@ export default function App() {
         },
         ...current,
       ])
+      setToast(message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  async function generateVideoInNode(nodeId: string) {
+    const node = nodes.find((item) => item.id === nodeId)
+    if (!node || node.data.kind !== 'video') return
+
+    const incomingSources = edges
+      .filter((edge) => edge.target === nodeId)
+      .map((edge, edgeOrder) => ({
+        edge,
+        edgeOrder,
+        sourceNode: nodes.find((item) => item.id === edge.source),
+      }))
+      .filter(
+        (item): item is { edge: Edge; edgeOrder: number; sourceNode: WorkflowNode } => Boolean(item.sourceNode),
+      )
+    const promptSourceNode = incomingSources
+      .find(
+        ({ edge, sourceNode }) =>
+          sourceNode.data.kind === 'prompt' &&
+          sourceNode.data.prompt?.trim() &&
+          (edge.targetHandle === 'prompt' || !edge.targetHandle),
+      )?.sourceNode
+    const referenceImageUrls = incomingSources
+      .filter(
+        ({ edge, sourceNode }) =>
+          Boolean(sourceNode.data.imageUrl) &&
+          (isImageInputHandle(edge.targetHandle) || (!edge.targetHandle && sourceNode.data.kind !== 'prompt')),
+      )
+      .sort((left, right) => {
+        const leftIndex = imageInputHandleIndex(left.edge.targetHandle)
+        const rightIndex = imageInputHandleIndex(right.edge.targetHandle)
+        if (leftIndex !== null && rightIndex !== null && leftIndex !== rightIndex) return leftIndex - rightIndex
+        if (leftIndex !== null && rightIndex === null) return -1
+        if (leftIndex === null && rightIndex !== null) return 1
+        return left.edgeOrder - right.edgeOrder
+      })
+      .map(({ sourceNode }) => sourceNode.data.imageUrl as string)
+    const trimmed = promptSourceNode?.data.prompt?.trim() || node.data.prompt?.trim() || ''
+
+    if (!trimmed) {
+      updateNodeData(nodeId, { status: 'error', error: '请先连接提示词输入框并填写视频提示词。' })
+      return
+    }
+
+    if (apiConfig.mode !== 'apimart') {
+      updateNodeData(nodeId, { status: 'error', error: '请在 API 设置中选择“API Mart 图像 / 视频”并填写 API Key。' })
+      return
+    }
+
+    const outputSize = node.data.size || apiConfig.size || defaultApiConfig.size
+    const configForNode = { ...apiConfig, size: outputSize }
+    const videoModel = findApiMartVideoModel(apiConfig.videoModel)
+
+    setIsGenerating(true)
+    updateNodeData(nodeId, {
+      status: 'generating',
+      error: undefined,
+      model: videoModel.id,
+      size: outputSize,
+    })
+
+    try {
+      const orderedPrompt = promptWithReferenceImageOrder(trimmed, referenceImageUrls.length)
+      const videoUrl = await requestGeneratedVideo(orderedPrompt, configForNode, referenceImageUrls)
+      updateNodeData(nodeId, {
+        videoUrl,
+        status: 'done',
+        error: undefined,
+        model: videoModel.id,
+        size: outputSize,
+      })
+      const referenceSummary = referenceImageUrls.length
+        ? `，已读取 ${referenceImageUrls.length} 张参考图`
+        : ''
+      setToast(`已使用 ${videoModel.label} 生成 ${apiConfig.videoDuration} 秒视频${referenceSummary}。`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '视频生成失败'
+      updateNodeData(nodeId, { status: 'error', error: message })
       setToast(message)
     } finally {
       setIsGenerating(false)
@@ -3453,6 +3657,10 @@ export default function App() {
       void generateImageInNode(node.id)
       return
     }
+    if (node?.data.kind === 'video') {
+      void generateVideoInNode(node.id)
+      return
+    }
     if (node?.data.kind === 'repaint') {
       void generateRepaintInNode(node.id)
       return
@@ -3520,7 +3728,38 @@ export default function App() {
     closeContextMenu()
   }
 
-  function addImageToImageQuickWorkflow() {
+  function addVideoGenerationNodeAt(position: XYPosition) {
+    const node: WorkflowNode = {
+      id: id('video'),
+      type: 'workflow',
+      position,
+      data: {
+        kind: 'video',
+        title: 'AI 视频生成',
+        prompt: '',
+        status: 'idle',
+        model: apiConfig.videoModel,
+        size: apiConfig.size || defaultApiConfig.size,
+        createdAt: new Date().toLocaleString('zh-CN'),
+      },
+    }
+    setNodes((current) => [...current, node])
+    setSelectedNodeId(node.id)
+    markDirty()
+    setToast('已在画布中添加视频生成框。')
+  }
+
+  function addVideoGenerationFromMenu() {
+    if (!contextMenu) return
+    addVideoGenerationNodeAt(contextMenu.flowPosition)
+    closeContextMenu()
+  }
+
+  function addQuickStartWorkflow(options: {
+    outputKind: 'image' | 'video'
+    initialPrompt?: string
+    toastMessage: string
+  }) {
     const canvasCenter = flowInstance?.screenToFlowPosition(
       { x: window.innerWidth / 2, y: window.innerHeight / 2 },
       { snapToGrid: true, snapGrid: [24, 24] },
@@ -3528,7 +3767,7 @@ export default function App() {
     const createdAt = new Date().toLocaleString('zh-CN')
     const referenceNodeId = id('ref')
     const promptNodeId = id('prompt')
-    const imageNodeId = id('image')
+    const outputNodeId = id(options.outputKind)
     const referenceNode: WorkflowNode = {
       id: referenceNodeId,
       type: 'workflow',
@@ -3549,24 +3788,24 @@ export default function App() {
       data: {
         kind: 'prompt',
         title: '提示词输入框',
-        prompt: '',
+        prompt: options.initialPrompt || '',
         status: 'idle',
         model: apiConfig.model,
         size: apiConfig.size || defaultApiConfig.size,
         createdAt,
       },
     }
-    const imageNode: WorkflowNode = {
-      id: imageNodeId,
+    const outputNode: WorkflowNode = {
+      id: outputNodeId,
       type: 'workflow',
       position: { x: canvasCenter.x - 40, y: canvasCenter.y - 250 },
       selected: true,
       data: {
-        kind: 'image',
-        title: 'AI 生成图像',
+        kind: options.outputKind,
+        title: options.outputKind === 'video' ? 'AI 视频生成' : 'AI 生成图像',
         prompt: '',
         status: 'idle',
-        model: apiConfig.model,
+        model: options.outputKind === 'video' ? apiConfig.videoModel : apiConfig.model,
         size: apiConfig.size || defaultApiConfig.size,
         createdAt,
       },
@@ -3576,7 +3815,7 @@ export default function App() {
         id: id('edge'),
         source: referenceNodeId,
         sourceHandle: 'output',
-        target: imageNodeId,
+        target: outputNodeId,
         targetHandle: `${imageInputHandlePrefix}1`,
         animated: true,
         markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
@@ -3586,7 +3825,7 @@ export default function App() {
         id: id('edge'),
         source: promptNodeId,
         sourceHandle: 'output',
-        target: imageNodeId,
+        target: outputNodeId,
         targetHandle: 'prompt',
         animated: true,
         markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
@@ -3598,22 +3837,44 @@ export default function App() {
       ...current.map((node) => ({ ...node, selected: false })),
       referenceNode,
       promptNode,
-      imageNode,
+      outputNode,
     ])
     setEdges((current) => [...current, ...workflowEdges])
-    setSelectedNodeId(imageNodeId)
+    setSelectedNodeId(outputNodeId)
     setShowQuickWorkflows(false)
     setShowPromptLibrary(false)
     markDirty()
-    setToast('已创建图生图快捷工作流，请上传参考图并填写提示词。')
+    setToast(options.toastMessage)
     window.setTimeout(() => {
       void flowInstance?.fitView({
-        nodes: [{ id: referenceNodeId }, { id: promptNodeId }, { id: imageNodeId }],
+        nodes: [{ id: referenceNodeId }, { id: promptNodeId }, { id: outputNodeId }],
         padding: 0.18,
         maxZoom: 0.92,
         duration: 240,
       })
     }, 0)
+  }
+
+  function addImageToImageQuickWorkflow() {
+    addQuickStartWorkflow({
+      outputKind: 'image',
+      toastMessage: '已创建参考图生成工作流，请上传参考图并填写提示词。',
+    })
+  }
+
+  function addVideoQuickWorkflow() {
+    addQuickStartWorkflow({
+      outputKind: 'video',
+      toastMessage: '已创建视频生成工作流，请上传参考图并填写提示词。',
+    })
+  }
+
+  function addProductRetouchQuickWorkflow() {
+    addQuickStartWorkflow({
+      outputKind: 'image',
+      initialPrompt: productRetouchPrompt,
+      toastMessage: '已创建产品图精修工作流，请上传待精修的产品图。',
+    })
   }
 
   function addOutpaintNodeAt(position: XYPosition) {
@@ -4001,11 +4262,20 @@ export default function App() {
       }
       if (next.mode === 'apimart') {
         const model = findApiMartModel(next.model)
+        const videoModel = findApiMartVideoModel(next.videoModel)
+        const requestedDuration = Number(next.videoDuration)
         next = {
           ...next,
           endpoint: next.endpoint || apiMartApiConfig.endpoint || '',
           model: model.id,
           imageSize: model.resolutions.includes(next.imageSize) ? next.imageSize : model.defaultResolution,
+          videoModel: videoModel.id,
+          videoResolution: videoModel.resolutions.includes(next.videoResolution)
+            ? next.videoResolution
+            : videoModel.defaultResolution,
+          videoDuration: Number.isFinite(requestedDuration)
+            ? Math.min(videoModel.maxDuration, Math.max(videoModel.minDuration, Math.round(requestedDuration)))
+            : videoModel.defaultDuration,
         }
       }
 
@@ -4204,19 +4474,20 @@ export default function App() {
               </button>
             </div>
           )}
-          {!welcomeDismissed && nodes.length === 0 && (
-            <div className="canvas-welcome" aria-hidden="true">
-              <h2 key={welcomeTitleIndex} className="canvas-welcome-title">
-                {Array.from(welcomeTitles[welcomeTitleIndex]).map((character, index) => (
-                  <span
-                    className="canvas-welcome-char"
-                    style={{ animationDelay: `${index * 58}ms` }}
-                    key={`${character}-${index}`}
-                  >
-                    {character}
-                  </span>
-                ))}
-              </h2>
+          {nodes.length === 0 && (
+            <div className="canvas-quick-start" role="group" aria-label="快速启动">
+              <button className="canvas-quick-start-button" type="button" onClick={addImageToImageQuickWorkflow}>
+                <ImageIcon size={18} aria-hidden="true" />
+                <span>参考图生成</span>
+              </button>
+              <button className="canvas-quick-start-button" type="button" onClick={addVideoQuickWorkflow}>
+                <Video size={18} aria-hidden="true" />
+                <span>视频生成</span>
+              </button>
+              <button className="canvas-quick-start-button" type="button" onClick={addProductRetouchQuickWorkflow}>
+                <Wand2 size={18} aria-hidden="true" />
+                <span>产品图精修</span>
+              </button>
             </div>
           )}
           {contextMenu && (
@@ -4237,8 +4508,12 @@ export default function App() {
                 <ImageIcon size={15} />
                 图像生成
               </button>
+              <button type="button" onClick={addVideoGenerationFromMenu}>
+                <Video size={15} />
+                视频生成
+              </button>
               <button type="button" onClick={addOutpaintFromMenu}>
-                  <Expand size={15} />
+                <Expand size={15} />
                 AI扩图
               </button>
             </div>
@@ -4587,7 +4862,7 @@ export default function App() {
             <div className="modal-head">
               <div>
                 <h2>API 设置</h2>
-                <p>支持 API Mart、Agnes AI、OpenAI 兼容图像接口，也可以接自己的 JSON API。</p>
+                <p>支持 API Mart 图像与视频、Agnes AI、OpenAI 兼容图像接口，也可以接自己的 JSON API。</p>
               </div>
               <button type="button" onClick={() => setShowSettings(false)} title="关闭">
                 <X size={18} />
@@ -4601,7 +4876,7 @@ export default function App() {
                   <option value="grsai">GA 全部生图模型</option>
                   <option value="change2pro">Change2Pro 生图模型</option>
                   <option value="agnes">Agnes AI 生图模型</option>
-                  <option value="apimart">API Mart 生图模型</option>
+                  <option value="apimart">API Mart 图像 / 视频</option>
                   <option value="mock">本地模拟</option>
                   <option value="openai">OpenAI 兼容</option>
                   <option value="custom">自定义 JSON API</option>
@@ -4724,42 +4999,95 @@ export default function App() {
                     </small>
                   </>
                 ) : apiConfig.mode === 'apimart' ? (
-                  <>
-                    <select
-                      aria-label="API Mart 生图模型"
-                      value={apiConfig.model}
-                      onChange={(event) => {
-                        const model = findApiMartModel(event.target.value)
-                        updateApiConfig({ model: model.id, imageSize: model.defaultResolution })
-                      }}
-                    >
-                      {apiMartModels.map((model) => (
-                        <option key={model.id} value={model.id}>{model.label}</option>
-                      ))}
-                    </select>
-                    <small className="change2pro-model-message success">
-                      已内置 5 个 API Mart 生图模型，生成任务会自动等待并读取最终图片。
-                    </small>
-                    <div className="change2pro-resolution-section">
-                      <div className="change2pro-resolution-head">
-                        <span>输出清晰度</span>
-                        <small>已按当前模型过滤可用档位</small>
-                      </div>
-                      <div className="change2pro-resolution-picker" role="group" aria-label="API Mart 输出清晰度">
-                        {findApiMartModel(apiConfig.model).resolutions.map((imageSize) => (
-                          <button
-                            className={apiConfig.imageSize === imageSize ? 'active' : ''}
-                            type="button"
-                            aria-pressed={apiConfig.imageSize === imageSize}
-                            onClick={() => updateApiConfig({ imageSize })}
-                            key={imageSize}
-                          >
-                            {imageSize}
-                          </button>
+                  <div className="apimart-model-stack">
+                    <section className="apimart-model-section">
+                      <strong>图像模型</strong>
+                      <select
+                        aria-label="API Mart 生图模型"
+                        value={apiConfig.model}
+                        onChange={(event) => {
+                          const model = findApiMartModel(event.target.value)
+                          updateApiConfig({ model: model.id, imageSize: model.defaultResolution })
+                        }}
+                      >
+                        {apiMartModels.map((model) => (
+                          <option key={model.id} value={model.id}>{model.label}</option>
                         ))}
+                      </select>
+                      <div className="change2pro-resolution-section">
+                        <div className="change2pro-resolution-head">
+                          <span>图像清晰度</span>
+                          <small>按模型过滤</small>
+                        </div>
+                        <div className="change2pro-resolution-picker" role="group" aria-label="API Mart 图像输出清晰度">
+                          {findApiMartModel(apiConfig.model).resolutions.map((imageSize) => (
+                            <button
+                              className={apiConfig.imageSize === imageSize ? 'active' : ''}
+                              type="button"
+                              aria-pressed={apiConfig.imageSize === imageSize}
+                              onClick={() => updateApiConfig({ imageSize })}
+                              key={imageSize}
+                            >
+                              {imageSize}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  </>
+                    </section>
+                    <section className="apimart-model-section">
+                      <strong>视频模型</strong>
+                      <select
+                        aria-label="API Mart 视频模型"
+                        value={apiConfig.videoModel}
+                        onChange={(event) => {
+                          const model = findApiMartVideoModel(event.target.value)
+                          updateApiConfig({
+                            videoModel: model.id,
+                            videoResolution: model.defaultResolution,
+                            videoDuration: model.defaultDuration,
+                          })
+                        }}
+                      >
+                        {apiMartVideoModels.map((model) => (
+                          <option key={model.id} value={model.id}>{model.label}</option>
+                        ))}
+                      </select>
+                      <div className="change2pro-resolution-section">
+                        <div className="change2pro-resolution-head">
+                          <span>视频清晰度</span>
+                          <small>按模型过滤</small>
+                        </div>
+                        <div className="change2pro-resolution-picker" role="group" aria-label="API Mart 视频输出清晰度">
+                          {findApiMartVideoModel(apiConfig.videoModel).resolutions.map((videoResolution) => (
+                            <button
+                              className={apiConfig.videoResolution === videoResolution ? 'active' : ''}
+                              type="button"
+                              aria-pressed={apiConfig.videoResolution === videoResolution}
+                              onClick={() => updateApiConfig({ videoResolution })}
+                              key={videoResolution}
+                            >
+                              {videoResolution}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <label className="apimart-duration-field">
+                        <span>视频时长</span>
+                        <input
+                          type="number"
+                          min={findApiMartVideoModel(apiConfig.videoModel).minDuration}
+                          max={findApiMartVideoModel(apiConfig.videoModel).maxDuration}
+                          step={1}
+                          value={apiConfig.videoDuration}
+                          onChange={(event) => updateApiConfig({ videoDuration: Number(event.target.value) })}
+                        />
+                        <small>秒 · {findApiMartVideoModel(apiConfig.videoModel).minDuration}–{findApiMartVideoModel(apiConfig.videoModel).maxDuration}</small>
+                      </label>
+                    </section>
+                    <small className="change2pro-model-message success">
+                      已接入 5 个图像模型和 3 个视频模型，任务会自动等待并读取最终结果。
+                    </small>
+                  </div>
                 ) : (
                   <input aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })} />
                 )}

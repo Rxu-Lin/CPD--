@@ -30,6 +30,7 @@ const generationRateLimits = new Map<string, { count: number; startedAt: number 
 type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'agnes' | 'apimart' | 'custom'
 type ImageResolutionTier = '1K' | '1.5K' | '2K' | '3K' | '4K'
 type GptImageResolutionTier = '1K' | '2K' | '4K'
+type VideoResolutionTier = '480p' | '720p' | '768P' | '1080p' | '2K' | '4k'
 
 type ApiConfig = {
   mode: ApiMode
@@ -37,6 +38,9 @@ type ApiConfig = {
   apiKey: string
   model: string
   imageSize?: ImageResolutionTier
+  videoModel?: string
+  videoResolution?: VideoResolutionTier
+  videoDuration?: number
   size: string
   bodyTemplate: string
   responsePath: string
@@ -587,8 +591,8 @@ function dataUrlFromImage(image: { buffer: Buffer; mediaType: string }) {
   return `data:${image.mediaType};base64,${image.buffer.toString('base64')}`
 }
 
-function formatUpstreamFetchError(error: unknown, endpoint: string) {
-  if (!(error instanceof Error)) return '连接图像 API 失败'
+function formatUpstreamFetchError(error: unknown, endpoint: string, resource = '图像') {
+  if (!(error instanceof Error)) return `连接${resource} API 失败`
 
   const cause = (error as Error & { cause?: unknown }).cause as
     | {
@@ -608,10 +612,10 @@ function formatUpstreamFetchError(error: unknown, endpoint: string) {
         return endpoint
       }
     })()
-    return `连接图像 API 失败：${cause.code}（${target}）。请检查 Endpoint 是否可访问，或改用可访问的 API 代理地址。`
+    return `连接${resource} API 失败：${cause.code}（${target}）。请检查 Endpoint 是否可访问，或改用可访问的 API 代理地址。`
   }
 
-  return `连接图像 API 失败：${error.message}`
+  return `连接${resource} API 失败：${error.message}`
 }
 
 function aspectRatioFromSize(size: string) {
@@ -831,15 +835,15 @@ function knownErrorText(source: unknown) {
   return undefined
 }
 
-function httpFailureMessage(source: unknown, status: number, statusText: string) {
+function httpFailureMessage(source: unknown, status: number, statusText: string, resource = '图像') {
   const detail = knownErrorText(source)
-  if (detail) return `图像接口拒绝请求（${status}）：${detail}`
-  if (status === 400) return '图像接口拒绝请求（400）：当前模型不接受这组尺寸、参考图或提示词，请检查生成参数。'
-  if (status === 401) return '图像接口鉴权失败（401）：请检查 API Key。'
-  if (status === 402 || status === 403) return `图像接口拒绝访问（${status}）：请检查账户余额、模型权限或内容审核结果。`
-  if (status === 429) return '图像接口请求过于频繁（429）：请稍后重试。'
-  if (status >= 500) return `图像接口上游服务异常（${status}），请稍后重试。`
-  return `图像接口请求失败（${status} ${statusText}）。`
+  if (detail) return `${resource}接口拒绝请求（${status}）：${detail}`
+  if (status === 400) return `${resource}接口拒绝请求（400）：当前模型不接受这组尺寸、参考素材或提示词，请检查生成参数。`
+  if (status === 401) return `${resource}接口鉴权失败（401）：请检查 API Key。`
+  if (status === 402 || status === 403) return `${resource}接口拒绝访问（${status}）：请检查账户余额、模型权限或内容审核结果。`
+  if (status === 429) return `${resource}接口请求过于频繁（429）：请稍后重试。`
+  if (status >= 500) return `${resource}接口上游服务异常（${status}），请稍后重试。`
+  return `${resource}接口请求失败（${status} ${statusText}）。`
 }
 
 function compactJson(source: unknown) {
@@ -879,7 +883,7 @@ function parseJsonLikeResponse(text: string) {
   throw new Error(`Image API returned unreadable response: ${text.slice(0, 240)}`)
 }
 
-async function postJson(endpoint: string, headers: Record<string, string>, payload: unknown) {
+async function postJson(endpoint: string, headers: Record<string, string>, payload: unknown, resource = '图像') {
   let response: Response
   try {
     response = await fetch(await validateUpstreamEndpoint(endpoint), {
@@ -891,20 +895,20 @@ async function postJson(endpoint: string, headers: Record<string, string>, paylo
       body: JSON.stringify(payload),
     })
   } catch (error) {
-    throw new Error(formatUpstreamFetchError(error, endpoint))
+    throw new Error(formatUpstreamFetchError(error, endpoint, resource))
   }
 
   const text = await response.text()
   const json = parseJsonLikeResponse(text)
 
   if (!response.ok) {
-    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText), response.status)
+    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText, resource), response.status)
   }
 
   return json
 }
 
-async function getJson(endpoint: string, headers: Record<string, string>) {
+async function getJson(endpoint: string, headers: Record<string, string>, resource = '图像') {
   let response: Response
   try {
     response = await fetch(await validateUpstreamEndpoint(endpoint), {
@@ -912,14 +916,14 @@ async function getJson(endpoint: string, headers: Record<string, string>) {
       headers,
     })
   } catch (error) {
-    throw new Error(formatUpstreamFetchError(error, endpoint))
+    throw new Error(formatUpstreamFetchError(error, endpoint, resource))
   }
 
   const text = await response.text()
   const json = parseJsonLikeResponse(text)
 
   if (!response.ok) {
-    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText), response.status)
+    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText, resource), response.status)
   }
 
   return json
@@ -1365,6 +1369,64 @@ const apiMartModelConfigs: Record<
   },
 }
 
+const apiMartVideoModelConfigs: Record<
+  string,
+  {
+    label: string
+    resolutions: VideoResolutionTier[]
+    defaultResolution: VideoResolutionTier
+    minDuration: number
+    maxDuration: number
+    defaultDuration: number
+    maxReferenceImages: number
+  }
+> = {
+  'seedance-2.5': {
+    label: 'Seedance 2.5',
+    resolutions: ['480p', '720p', '1080p'],
+    defaultResolution: '720p',
+    minDuration: 4,
+    maxDuration: 30,
+    defaultDuration: 5,
+    maxReferenceImages: 30,
+  },
+  'seedance-2.0': {
+    label: 'Seedance 2.0',
+    resolutions: ['480p', '720p', '1080p', '4k'],
+    defaultResolution: '720p',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    maxReferenceImages: 9,
+  },
+  'MiniMax-H3': {
+    label: 'MiniMax H3',
+    resolutions: ['768P', '2K'],
+    defaultResolution: '2K',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    maxReferenceImages: 9,
+  },
+}
+
+function apiMartSiblingEndpoint(generationEndpoint: string, siblingPath: string) {
+  const url = new URL(generationEndpoint)
+  const versionIndex = url.pathname.indexOf('/v1')
+  const basePath = versionIndex >= 0 ? url.pathname.slice(0, versionIndex) : ''
+  url.pathname = `${basePath}/v1/${siblingPath}`
+  url.search = ''
+  return url.toString()
+}
+
+function apiMartVideoEndpoint(generationEndpoint: string) {
+  return apiMartSiblingEndpoint(generationEndpoint, 'videos/generations')
+}
+
+function apiMartUploadImageEndpoint(generationEndpoint: string) {
+  return apiMartSiblingEndpoint(generationEndpoint, 'uploads/images')
+}
+
 function apiMartTaskEndpoint(generationEndpoint: string, taskId: string) {
   const url = new URL(generationEndpoint)
   const versionIndex = url.pathname.indexOf('/v1')
@@ -1421,6 +1483,33 @@ function apiMartImageUrl(source: unknown) {
   }
 
   return stringValue(result, ['url', 'image_url', 'imageUrl'])
+}
+
+function apiMartVideoUrl(source: unknown) {
+  const task = apiMartTaskData(source)
+  if (!task) return undefined
+  const result = task.result && typeof task.result === 'object'
+    ? (task.result as Record<string, unknown>)
+    : task
+  const videos = Array.isArray(result.videos)
+    ? result.videos
+    : Array.isArray(result.data)
+      ? result.data
+      : []
+
+  for (const video of videos) {
+    if (typeof video === 'string' && video.trim()) return video
+    if (!video || typeof video !== 'object') continue
+    const item = video as Record<string, unknown>
+    const directUrl = stringValue(item, ['video_url', 'videoUrl', 'output_url', 'outputUrl'])
+    if (directUrl) return directUrl
+    if (typeof item.url === 'string' && item.url.trim()) return item.url
+    const urls = Array.isArray(item.url) ? item.url : Array.isArray(item.urls) ? item.urls : []
+    const firstUrl = urls.find((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+    if (firstUrl) return firstUrl
+  }
+
+  return stringValue(result, ['video_url', 'videoUrl', 'output_url', 'outputUrl', 'url'])
 }
 
 function apiMartTaskStatus(source: unknown) {
@@ -1497,6 +1586,126 @@ async function requestApiMartImage(config: ApiConfig, prompt: string, referenceI
   throw new Error(`API Mart 生成超时（任务 ${taskId}），请稍后重新生成。`)
 }
 
+async function uploadApiMartReferenceImage(
+  generationEndpoint: string,
+  apiKey: string,
+  imageUrl: string,
+  index: number,
+) {
+  if (!shouldInlineGrsAiReference(imageUrl)) return imageUrl
+
+  const image = await loadImageBuffer(imageUrl)
+  validateReferenceImage(image, index)
+  const form = new FormData()
+  form.append(
+    'file',
+    new Blob([new Uint8Array(image.buffer)], { type: image.mediaType }),
+    `reference-${index + 1}${image.extension}`,
+  )
+
+  const uploadEndpoint = apiMartUploadImageEndpoint(generationEndpoint)
+  let response: Response
+  try {
+    response = await fetch(await validateUpstreamEndpoint(uploadEndpoint), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+    })
+  } catch (error) {
+    throw new Error(formatUpstreamFetchError(error, uploadEndpoint, '参考图上传'))
+  }
+
+  const text = await response.text()
+  const json = parseJsonLikeResponse(text)
+  if (!response.ok) {
+    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText, '参考图上传'), response.status)
+  }
+  if (!json || typeof json !== 'object') throw new Error(`API Mart 未返回参考图 ${index + 1} 的上传地址。`)
+  const uploadedUrl = stringValue(json as Record<string, unknown>, ['url', 'image_url', 'imageUrl'])
+  if (!uploadedUrl) throw new Error(`API Mart 未返回参考图 ${index + 1} 的上传地址。`)
+  return uploadedUrl
+}
+
+async function requestApiMartVideo(config: ApiConfig, prompt: string, referenceImageUrls: string[]) {
+  if (!config.apiKey?.trim()) throw new UpstreamHttpError('请先填写 API Mart API Key。', 400)
+  const modelId = config.videoModel || 'seedance-2.5'
+  const modelConfig = apiMartVideoModelConfigs[modelId]
+  if (!modelConfig) throw new UpstreamHttpError('当前 API Mart 视频模型不在网站内置的可选列表中。', 400)
+
+  const aspectRatio = aspectRatioFromSize(config.size)
+  const supportedRatios = new Set(['16:9', '4:3', '1:1', '3:4', '9:16'])
+  if (!supportedRatios.has(aspectRatio)) {
+    throw new UpstreamHttpError(
+      `${modelConfig.label} 暂不支持 ${aspectRatio}，请选择 16:9、4:3、1:1、3:4 或 9:16。`,
+      400,
+    )
+  }
+
+  if (referenceImageUrls.length > modelConfig.maxReferenceImages) {
+    throw new UpstreamHttpError(
+      `${modelConfig.label} 最多支持 ${modelConfig.maxReferenceImages} 张参考图，现已连接 ${referenceImageUrls.length} 张。`,
+      400,
+    )
+  }
+
+  const videoEndpoint = apiMartVideoEndpoint(config.endpoint.trim())
+  const preparedImages = await Promise.all(
+    referenceImageUrls.map((imageUrl, index) =>
+      uploadApiMartReferenceImage(config.endpoint.trim(), config.apiKey.trim(), imageUrl, index),
+    ),
+  )
+  const requestedResolution = config.videoResolution
+  const resolution = requestedResolution && modelConfig.resolutions.includes(requestedResolution)
+    ? requestedResolution
+    : modelConfig.defaultResolution
+  const requestedDuration = Number(config.videoDuration)
+  const duration = Number.isFinite(requestedDuration)
+    ? Math.min(modelConfig.maxDuration, Math.max(modelConfig.minDuration, Math.round(requestedDuration)))
+    : modelConfig.defaultDuration
+  const payload: Record<string, unknown> = {
+    model: modelId,
+    prompt,
+    duration,
+    resolution,
+    [modelId === 'MiniMax-H3' ? 'aspect_ratio' : 'size']: aspectRatio,
+  }
+  if (modelId !== 'MiniMax-H3') payload.generate_audio = true
+  if (preparedImages.length) payload.image_urls = preparedImages
+
+  const headers = { Authorization: `Bearer ${config.apiKey.trim()}` }
+  let created: unknown
+  try {
+    created = await postJson(videoEndpoint, headers, payload, '视频')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'API Mart 视频请求失败'
+    const detail = `${message}（模型 ${modelConfig.label}，${resolution}，${duration} 秒，参考图 ${preparedImages.length} 张）`
+    if (error instanceof UpstreamHttpError) throw new UpstreamHttpError(detail, error.statusCode)
+    throw new Error(detail)
+  }
+
+  const directUrl = apiMartVideoUrl(created)
+  if (directUrl) return { data: [{ url: directUrl }], apimart: created }
+
+  const taskId = apiMartTaskId(created)
+  if (!taskId) throw new Error(`API Mart 已响应，但没有返回视频任务 ID。响应：${compactJson(created)}`)
+
+  const taskEndpoint = apiMartTaskEndpoint(videoEndpoint, taskId)
+  for (let index = 0; index < 180; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, index === 0 ? 3000 : 5000))
+    const result = await getJson(taskEndpoint, headers, '视频')
+    const videoUrl = apiMartVideoUrl(result)
+    if (videoUrl) return { data: [{ url: videoUrl }], apimart: result }
+
+    const status = apiMartTaskStatus(result)
+    if (status === 'failed' || status === 'cancelled' || status === 'canceled') {
+      throw new Error(`API Mart 视频生成失败：${apiMartTaskError(result) || status}`)
+    }
+    if (status === 'completed') throw new Error('API Mart 视频任务已完成，但响应中没有找到视频地址。')
+  }
+
+  throw new Error(`API Mart 视频生成超时（任务 ${taskId}），请稍后重新生成。`)
+}
+
 async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string; referenceImageUrl?: string; referenceImageUrls?: string[]; maskUrl?: string }) {
   const config = body.config
   const prompt = body.prompt?.trim()
@@ -1569,6 +1778,21 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
   return json
 }
 
+async function proxyVideoGeneration(body: {
+  config?: ApiConfig
+  prompt?: string
+  referenceImageUrl?: string
+  referenceImageUrls?: string[]
+}) {
+  const config = body.config
+  const prompt = body.prompt?.trim()
+  if (!config) throw new Error('缺少 API 配置')
+  if (!prompt) throw new Error('缺少视频提示词')
+  if (config.mode !== 'apimart') throw new UpstreamHttpError('视频生成目前需要使用 API Mart 模式。', 400)
+  if (!config.endpoint?.trim()) throw new UpstreamHttpError('请先填写 API Mart Endpoint。', 400)
+  return requestApiMartVideo(config, prompt, referenceImageUrlsFromBody(body))
+}
+
 function localImageLibraryPlugin(): Plugin {
   const configureApiServer = (server: Pick<ViteDevServer, 'middlewares'>) => {
       server.middlewares.use('/api/change2pro/models', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
@@ -1606,6 +1830,35 @@ function localImageLibraryPlugin(): Plugin {
           const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
           sendJson(res, statusCode, {
             error: error instanceof Error ? error.message : 'Agnes AI 模型列表读取失败',
+          })
+        }
+      })
+
+      server.middlewares.use('/api/videos/generate', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') {
+          next()
+          return
+        }
+
+        if (!consumeGenerationQuota(req)) {
+          res.setHeader('Retry-After', '60')
+          sendJson(res, 429, { error: '请求过于频繁，请稍后再试。' })
+          return
+        }
+
+        try {
+          const body = JSON.parse(await readBody(req)) as {
+            config?: ApiConfig
+            prompt?: string
+            referenceImageUrl?: string
+            referenceImageUrls?: string[]
+          }
+          const result = await proxyVideoGeneration(body)
+          sendJson(res, 200, result)
+        } catch (error) {
+          const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
+          sendJson(res, statusCode, {
+            error: error instanceof Error ? error.message : '生成视频失败',
           })
         }
       })

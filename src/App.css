@@ -62,17 +62,16 @@
   height: 40px;
   flex: 0 0 auto;
   place-items: center;
-  border-radius: 8px;
-  background: var(--canvas);
+  background: transparent;
 }
 
 .brand-mark img {
   display: block;
   width: 100%;
   height: 100%;
-  border-radius: 8px;
-  background: var(--canvas);
+  background: transparent;
   filter: grayscale(1) contrast(3);
+  mix-blend-mode: screen;
   object-fit: cover;
 }
 
@@ -349,55 +348,60 @@
   min-height: 0;
 }
 
-.canvas-welcome {
+.canvas-quick-start {
   position: absolute;
   z-index: 4;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 24px;
   pointer-events: none;
 }
 
-.canvas-welcome-title {
-  display: inline-block;
-  max-width: min(720px, calc(100vw - 64px));
-  margin: 0;
-  overflow: hidden;
-  color: rgba(214, 221, 228, 0.68);
-  font-size: clamp(24px, 2vw, 34px);
-  font-weight: 520;
-  letter-spacing: 0.025em;
-  line-height: 1.25;
-  text-align: center;
-  text-wrap: balance;
-  overflow-wrap: break-word;
-  white-space: normal;
-  text-shadow: 0 1px 20px rgba(255, 255, 255, 0.035);
+.canvas-quick-start-button {
+  display: inline-flex;
+  min-width: 156px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 1px solid rgba(183, 193, 204, 0.2);
+  border-radius: 10px;
+  background: rgba(19, 25, 33, 0.94);
+  box-shadow:
+    0 14px 38px rgba(0, 0, 0, 0.25),
+    0 1px 0 rgba(255, 255, 255, 0.035) inset;
+  color: rgba(235, 240, 244, 0.88);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  pointer-events: auto;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, transform 160ms ease;
 }
 
-.canvas-welcome-char {
-  display: inline-block;
-  opacity: 0;
-  filter: blur(6px);
-  transform: translateY(22px);
-  animation: canvas-welcome-character-in 0.9s cubic-bezier(0.165, 0.84, 0.44, 1) forwards;
-  will-change: transform, opacity, filter;
+.canvas-quick-start-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(225, 231, 237, 0.4);
+  background: rgba(25, 32, 41, 0.98);
+  color: #ffffff;
 }
 
-@keyframes canvas-welcome-character-in {
-  to {
-    opacity: 1;
-    filter: blur(0);
-    transform: translateY(0);
-  }
+.canvas-quick-start-button:focus-visible {
+  outline: 2px solid rgba(235, 240, 244, 0.78);
+  outline-offset: 3px;
+}
+
+.canvas-quick-start-button:active {
+  transform: translateY(0);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .canvas-welcome-char {
-    opacity: 1;
-    filter: none;
-    transform: none;
-    animation: none;
+  .canvas-quick-start-button {
+    transition: none;
   }
 }
 
@@ -659,6 +663,10 @@
   width: 330px;
 }
 
+.workflow-node.video {
+  width: 330px;
+}
+
 .workflow-node.repaint {
   width: 360px;
 }
@@ -859,6 +867,17 @@
   animation: node-image-reveal 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+.node-video {
+  display: block;
+  width: calc(100% - 24px);
+  margin: 0 12px 12px;
+  border: 1px solid rgba(154, 167, 182, 0.12);
+  border-radius: 8px;
+  background: #090d12;
+  object-fit: contain;
+  animation: node-image-reveal 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 .workflow-node.reference .node-image {
   height: auto;
   aspect-ratio: auto;
@@ -878,6 +897,17 @@
 
 .node-empty svg {
   margin-bottom: 6px;
+}
+
+.node-video-empty {
+  gap: 0;
+}
+
+.node-video-empty small {
+  display: block;
+  margin-top: 5px;
+  color: rgba(154, 167, 182, 0.55);
+  font-size: 9px;
 }
 
 .node-empty.generating {
@@ -2630,6 +2660,46 @@
 
 .change2pro-resolution-picker button.active {
   box-shadow: 0 0 0 1px rgba(97, 199, 232, 0.08) inset;
+}
+
+.apimart-model-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.apimart-model-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(142, 155, 170, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.apimart-model-section > strong {
+  color: #e4ebf1;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.apimart-duration-field {
+  display: grid;
+  grid-template-columns: auto minmax(72px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.field .apimart-duration-field span,
+.field .apimart-duration-field small {
+  color: rgba(176, 189, 201, 0.76);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.field .apimart-duration-field input {
+  height: 32px;
+  padding: 0 9px;
 }
 
 .modal-foot {
