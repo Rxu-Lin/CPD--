@@ -34,6 +34,7 @@ import {
   Brush,
   Check,
   CheckCircle2,
+  ChevronDown,
   Copy,
   Download,
   Eye,
@@ -212,6 +213,7 @@ type ImageInputSlot = {
 
 type WorkflowNodeData = {
   kind: NodeKind
+  apiMode?: ApiMode
   title: string
   prompt?: string
   imageUrl?: string
@@ -226,7 +228,10 @@ type WorkflowNodeData = {
   outpaintPreset?: OutpaintPreset
   status: NodeStatus
   model?: string
+  imageSize?: ImageResolutionTier
   size?: string
+  videoResolution?: VideoResolutionTier
+  videoDuration?: number
   sourceName?: string
   error?: string
   createdAt: string
@@ -240,7 +245,12 @@ type WorkflowNodeData = {
   onRevealImage?: (id: string) => void
   onReplaceImage?: (id: string, file: File) => void
   onGenerate?: (id: string) => void
+  onChangeImageModel?: (id: string, model: string) => void
+  onChangeImageSize?: (id: string, imageSize: ImageResolutionTier) => void
+  onChangeVideoModel?: (id: string, model: string) => void
   onChangeSize?: (id: string, size: string) => void
+  onChangeVideoResolution?: (id: string, resolution: VideoResolutionTier) => void
+  onChangeVideoDuration?: (id: string, duration: number) => void
   onChangePrompt?: (id: string, prompt: string) => void
   onChangeMask?: (id: string, maskUrl: string) => void
   onChangeBrush?: (id: string, brushSize: number) => void
@@ -1215,6 +1225,15 @@ async function imageAsDataUrl(imageUrl: string) {
   return payload.dataUrl
 }
 
+function imageFileAsDataUrl(file: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error('无法读取剪贴板图片'))
+    reader.readAsDataURL(file)
+  })
+}
+
 function loadCanvasImage(imageUrl: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image()
@@ -1644,11 +1663,13 @@ function OutpaintRangeEditor({
 function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const updateNodeInternals = useUpdateNodeInternals()
   const replaceImageInputRef = useRef<HTMLInputElement>(null)
+  const modelPickerRef = useRef<HTMLDivElement>(null)
   const isPromptComposingRef = useRef(false)
   const lastCommittedPromptRef = useRef(data.prompt || '')
   const [promptDraft, setPromptDraft] = useState(data.prompt || '')
   const [referenceImageRatio, setReferenceImageRatio] = useState('—')
   const [referencePixelSize, setReferencePixelSize] = useState('')
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const isImage = data.kind === 'image'
   const isVideo = data.kind === 'video'
   const isPrompt = data.kind === 'prompt'
@@ -1667,6 +1688,23 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const outpaintInsets = data.outpaintInsets || defaultOutpaintInsets(sourceWidth, sourceHeight)
   const outpaintPreset = data.outpaintPreset || 'free'
   const configuredModelName = data.model?.trim() || ''
+  const usesApiMartNodeSettings = data.apiMode === 'apimart'
+  const imageModelConfig = findApiMartModel(configuredModelName)
+  const selectedImageSize = data.imageSize && imageModelConfig.resolutions.includes(data.imageSize)
+    ? data.imageSize
+    : imageModelConfig.defaultResolution
+  const videoModelConfig = findApiMartVideoModel(configuredModelName)
+  const selectedVideoResolution = data.videoResolution && videoModelConfig.resolutions.includes(data.videoResolution)
+    ? data.videoResolution
+    : videoModelConfig.defaultResolution
+  const requestedVideoDuration = Number(data.videoDuration)
+  const selectedVideoDuration = Number.isFinite(requestedVideoDuration)
+    ? Math.min(videoModelConfig.maxDuration, Math.max(videoModelConfig.minDuration, Math.round(requestedVideoDuration)))
+    : videoModelConfig.defaultDuration
+  const hasNodeModelPicker = usesApiMartNodeSettings && (isImage || isVideo)
+  const modelOptions: Array<{ id: string; label: string }> = isVideo ? apiMartVideoModels : apiMartModels
+  const selectedModelId = isVideo ? videoModelConfig.id : imageModelConfig.id
+  const selectedModelLabel = isVideo ? videoModelConfig.label : imageModelConfig.label
   const nodeTitle = isReference
     ? (data.sourceName || data.title)
     : isImage || isVideo
@@ -1698,6 +1736,36 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     lastCommittedPromptRef.current = nextPrompt
     if (!isPromptComposingRef.current) setPromptDraft(nextPrompt)
   }, [data.prompt])
+
+  useEffect(() => {
+    if (!isModelMenuOpen) return
+
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Element && !modelPickerRef.current?.contains(event.target)) {
+        setIsModelMenuOpen(false)
+      }
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsModelMenuOpen(false)
+    }
+
+    document.addEventListener('pointerdown', handleOutsidePointerDown, true)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handleOutsidePointerDown, true)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isModelMenuOpen])
+
+  useEffect(() => {
+    if (isGenerating) setIsModelMenuOpen(false)
+  }, [isGenerating])
+
+  const selectNodeModel = (modelId: string) => {
+    if (isImage) data.onChangeImageModel?.(nodeId, modelId)
+    if (isVideo) data.onChangeVideoModel?.(nodeId, modelId)
+    setIsModelMenuOpen(false)
+  }
 
   const commitPromptDraft = (nextPrompt: string) => {
     if (lastCommittedPromptRef.current === nextPrompt) return
@@ -1771,7 +1839,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
         </>
       )}
       <div className="node-head">
-        <div className="node-title">
+        <div className={`node-title ${hasNodeModelPicker ? 'has-model-picker' : ''}`}>
           {isRepaint ? (
             <Brush size={15} />
           ) : isOutpaint ? (
@@ -1785,12 +1853,57 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           ) : (
             <Wand2 size={15} />
           )}
-          <span
-            className={isReference ? 'reference-file-title' : undefined}
-            title={(isReference || isImage || isVideo) ? nodeTitle : undefined}
-          >
-            {nodeTitle}
-          </span>
+          {hasNodeModelPicker ? (
+            <div
+              ref={modelPickerRef}
+              className={`node-model-picker nodrag nopan nowheel ${isModelMenuOpen ? 'open' : ''}`}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <button
+                className="node-model-select"
+                type="button"
+                aria-label={isVideo ? '视频生成模型' : '图像生成模型'}
+                aria-haspopup="listbox"
+                aria-expanded={isModelMenuOpen}
+                title={isModelMenuOpen ? '收起模型列表' : '展开模型列表'}
+                disabled={isGenerating}
+                onClick={() => setIsModelMenuOpen((open) => !open)}
+              >
+                <span>{selectedModelLabel}</span>
+                <ChevronDown size={14} aria-hidden="true" />
+              </button>
+              {isModelMenuOpen && (
+                <div
+                  className="node-model-menu"
+                  role="listbox"
+                  aria-label={isVideo ? '可选视频模型' : '可选图像模型'}
+                >
+                  {modelOptions.map((model) => {
+                    const isSelectedModel = model.id === selectedModelId
+                    return (
+                      <button
+                        key={model.id}
+                        className={`node-model-option ${isSelectedModel ? 'selected' : ''}`}
+                        type="button"
+                        role="option"
+                        aria-selected={isSelectedModel}
+                        onClick={() => selectNodeModel(model.id)}
+                      >
+                        {model.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            <span
+              className={isReference ? 'reference-file-title' : undefined}
+              title={(isReference || isImage || isVideo) ? nodeTitle : undefined}
+            >
+              {nodeTitle}
+            </span>
+          )}
         </div>
         {isReference ? (
           <div
@@ -1987,6 +2100,71 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       )}
 
       {data.error && <div className="node-error">{data.error}</div>}
+
+      {isImage && usesApiMartNodeSettings && (
+        <div className="image-node-settings nodrag nopan nowheel" aria-label="图像输出设置">
+          <div className="video-resolution-control">
+            <div className="video-setting-heading">
+              <span>输出清晰度</span>
+              <small>{imageModelConfig.label}</small>
+            </div>
+            <div className="video-resolution-options" role="group" aria-label="图像输出清晰度">
+              {imageModelConfig.resolutions.map((imageSize) => (
+                <button
+                  className={selectedImageSize === imageSize ? 'active' : ''}
+                  type="button"
+                  key={imageSize}
+                  aria-pressed={selectedImageSize === imageSize}
+                  onClick={() => data.onChangeImageSize?.(nodeId, imageSize)}
+                  disabled={isGenerating}
+                >
+                  {imageSize}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isVideo && (
+        <div className="video-node-settings nodrag nopan nowheel" aria-label="视频输出设置">
+          <div className="video-resolution-control">
+            <div className="video-setting-heading">
+              <span>像素大小</span>
+              <small>{videoModelConfig.label}</small>
+            </div>
+            <div className="video-resolution-options" role="group" aria-label="视频像素大小">
+              {videoModelConfig.resolutions.map((resolution) => (
+                <button
+                  className={selectedVideoResolution === resolution ? 'active' : ''}
+                  type="button"
+                  key={resolution}
+                  aria-pressed={selectedVideoResolution === resolution}
+                  onClick={() => data.onChangeVideoResolution?.(nodeId, resolution)}
+                  disabled={isGenerating}
+                >
+                  {resolution}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label className="video-duration-control">
+            <span className="video-setting-heading">
+              <span>生成时长</span>
+              <output>{selectedVideoDuration} 秒</output>
+            </span>
+            <UnifiedRange
+              min={videoModelConfig.minDuration}
+              max={videoModelConfig.maxDuration}
+              step={1}
+              value={selectedVideoDuration}
+              onValueChange={(duration) => data.onChangeVideoDuration?.(nodeId, duration)}
+              disabled={isGenerating}
+              aria-label={`视频生成时长 ${selectedVideoDuration} 秒`}
+            />
+          </label>
+        </div>
+      )}
 
       {(isImage || isVideo || isRepaint) && (
         <div className="aspect-ratio-control nodrag nopan" aria-label="尺寸比例">
@@ -2654,6 +2832,62 @@ export default function App() {
     [updateNodeData],
   )
 
+  const changeNodeImageModel = useCallback(
+    (nodeId: string, modelId: string) => {
+      const model = findApiMartModel(modelId)
+      updateNodeData(nodeId, {
+        model: model.id,
+        imageSize: model.defaultResolution,
+        error: undefined,
+      })
+      setToast(`图像模型已切换为 ${model.label}。`)
+    },
+    [updateNodeData],
+  )
+
+  const changeNodeImageSize = useCallback(
+    (nodeId: string, imageSize: ImageResolutionTier) => {
+      const node = nodes.find((item) => item.id === nodeId)
+      const model = findApiMartModel(node?.data.model || apiConfig.model)
+      const nextImageSize = model.resolutions.includes(imageSize) ? imageSize : model.defaultResolution
+      updateNodeData(nodeId, { imageSize: nextImageSize, error: undefined })
+      setToast(`图像清晰度已设为 ${nextImageSize}。`)
+    },
+    [apiConfig.model, nodes, updateNodeData],
+  )
+
+  const changeNodeVideoModel = useCallback(
+    (nodeId: string, modelId: string) => {
+      const model = findApiMartVideoModel(modelId)
+      updateNodeData(nodeId, {
+        model: model.id,
+        videoResolution: model.defaultResolution,
+        videoDuration: model.defaultDuration,
+        error: undefined,
+      })
+      setToast(`视频模型已切换为 ${model.label}。`)
+    },
+    [updateNodeData],
+  )
+
+  const changeNodeVideoResolution = useCallback(
+    (nodeId: string, videoResolution: VideoResolutionTier) => {
+      updateNodeData(nodeId, { videoResolution, error: undefined })
+      setToast(`视频像素大小已设为 ${videoResolution}。`)
+    },
+    [updateNodeData],
+  )
+
+  const changeNodeVideoDuration = useCallback(
+    (nodeId: string, videoDuration: number) => {
+      const node = nodes.find((item) => item.id === nodeId)
+      const videoModel = findApiMartVideoModel(node?.data.model || apiConfig.videoModel)
+      const duration = Math.min(videoModel.maxDuration, Math.max(videoModel.minDuration, Math.round(videoDuration)))
+      updateNodeData(nodeId, { videoDuration: duration, error: undefined })
+    },
+    [apiConfig.videoModel, nodes, updateNodeData],
+  )
+
   const changeNodePrompt = useCallback(
     (nodeId: string, value: string) => {
       updateNodeData(nodeId, { prompt: value })
@@ -2772,6 +3006,7 @@ export default function App() {
           title: 'AI 生成图像',
           status: 'idle',
           model: apiConfig.model,
+          imageSize: apiConfig.imageSize,
           size: outputSize,
           createdAt,
           ...initialData,
@@ -3057,11 +3292,15 @@ export default function App() {
       ...node,
       data: {
         ...node.data,
+        apiMode: apiConfig.mode,
         model: node.data.kind === 'video'
-          ? apiConfig.videoModel
-          : (node.data.kind === 'image' || node.data.kind === 'repaint' || node.data.kind === 'outpaint')
+          ? (node.data.model || apiConfig.videoModel)
+          : node.data.kind === 'image'
+            ? (node.data.model || apiConfig.model)
+            : (node.data.kind === 'repaint' || node.data.kind === 'outpaint')
             ? apiConfig.model
             : node.data.model,
+        imageSize: node.data.kind === 'image' ? (node.data.imageSize || apiConfig.imageSize) : node.data.imageSize,
         promptInputConnected,
         imageInputConnected: imageInputEdges.length > 0,
         imageInputSlots,
@@ -3072,7 +3311,12 @@ export default function App() {
         onRevealImage: (nodeId: string) => void revealNodeImage(nodeId),
         onReplaceImage: replaceReferenceImage,
         onGenerate: (nodeId: string) => void generateFromNode(nodeId),
+        onChangeImageModel: changeNodeImageModel,
+        onChangeImageSize: changeNodeImageSize,
+        onChangeVideoModel: changeNodeVideoModel,
         onChangeSize: changeNodeSize,
+        onChangeVideoResolution: changeNodeVideoResolution,
+        onChangeVideoDuration: changeNodeVideoDuration,
         onChangePrompt: changeNodePrompt,
         onChangeMask: changeNodeMask,
         onChangeBrush: changeNodeBrush,
@@ -3147,6 +3391,7 @@ export default function App() {
         title: 'AI 生成图像',
         status: 'generating',
         model: apiConfig.model,
+        imageSize: apiConfig.imageSize,
         size: outputSize,
         createdAt,
       },
@@ -3258,14 +3503,24 @@ export default function App() {
     }
 
     const outputSize = node.data.size || apiConfig.size || defaultApiConfig.size
-    const configForNode = { ...apiConfig, size: outputSize }
+    const imageModel = apiConfig.mode === 'apimart'
+      ? findApiMartModel(node.data.model || apiConfig.model)
+      : null
+    const selectedModel = imageModel?.id || apiConfig.model
+    const imageSize = imageModel
+      ? (node.data.imageSize && imageModel.resolutions.includes(node.data.imageSize)
+          ? node.data.imageSize
+          : imageModel.defaultResolution)
+      : apiConfig.imageSize
+    const configForNode = { ...apiConfig, model: selectedModel, imageSize, size: outputSize }
     const createdAt = new Date().toLocaleString('zh-CN')
 
     setIsGenerating(true)
     updateNodeData(nodeId, {
       status: 'generating',
       error: undefined,
-      model: apiConfig.model,
+      model: selectedModel,
+      imageSize,
       size: outputSize,
     })
 
@@ -3276,14 +3531,15 @@ export default function App() {
         imageUrl,
         status: 'done',
         error: undefined,
-        model: apiConfig.model,
+        model: selectedModel,
+        imageSize,
         size: outputSize,
       })
       setHistory((current) => [
         {
           id: nodeId,
           prompt: trimmed,
-          model: apiConfig.model,
+          model: selectedModel,
           size: outputSize,
           createdAt,
           imageUrl,
@@ -3304,7 +3560,7 @@ export default function App() {
         {
           id: nodeId,
           prompt: trimmed,
-          model: apiConfig.model,
+          model: selectedModel,
           size: outputSize,
           createdAt,
           status: '失败',
@@ -3366,8 +3622,21 @@ export default function App() {
     }
 
     const outputSize = node.data.size || apiConfig.size || defaultApiConfig.size
-    const configForNode = { ...apiConfig, size: outputSize }
-    const videoModel = findApiMartVideoModel(apiConfig.videoModel)
+    const videoModel = findApiMartVideoModel(node.data.model || apiConfig.videoModel)
+    const videoResolution = node.data.videoResolution && videoModel.resolutions.includes(node.data.videoResolution)
+      ? node.data.videoResolution
+      : videoModel.defaultResolution
+    const requestedVideoDuration = Number(node.data.videoDuration)
+    const videoDuration = Number.isFinite(requestedVideoDuration)
+      ? Math.min(videoModel.maxDuration, Math.max(videoModel.minDuration, Math.round(requestedVideoDuration)))
+      : videoModel.defaultDuration
+    const configForNode = {
+      ...apiConfig,
+      videoModel: videoModel.id,
+      size: outputSize,
+      videoResolution,
+      videoDuration,
+    }
 
     setIsGenerating(true)
     updateNodeData(nodeId, {
@@ -3375,6 +3644,8 @@ export default function App() {
       error: undefined,
       model: videoModel.id,
       size: outputSize,
+      videoResolution,
+      videoDuration,
     })
 
     try {
@@ -3386,11 +3657,13 @@ export default function App() {
         error: undefined,
         model: videoModel.id,
         size: outputSize,
+        videoResolution,
+        videoDuration,
       })
       const referenceSummary = referenceImageUrls.length
         ? `，已读取 ${referenceImageUrls.length} 张参考图`
         : ''
-      setToast(`已使用 ${videoModel.label} 生成 ${apiConfig.videoDuration} 秒视频${referenceSummary}。`)
+      setToast(`已使用 ${videoModel.label} 生成 ${videoDuration} 秒·${videoResolution} 视频${referenceSummary}。`)
     } catch (error) {
       const message = error instanceof Error ? error.message : '视频生成失败'
       updateNodeData(nodeId, { status: 'error', error: message })
@@ -3712,6 +3985,7 @@ export default function App() {
         prompt: '',
         status: 'idle',
         model: apiConfig.model,
+        imageSize: apiConfig.imageSize,
         size: apiConfig.size || defaultApiConfig.size,
         createdAt: new Date().toLocaleString('zh-CN'),
       },
@@ -3740,6 +4014,8 @@ export default function App() {
         status: 'idle',
         model: apiConfig.videoModel,
         size: apiConfig.size || defaultApiConfig.size,
+        videoResolution: findApiMartVideoModel(apiConfig.videoModel).defaultResolution,
+        videoDuration: findApiMartVideoModel(apiConfig.videoModel).defaultDuration,
         createdAt: new Date().toLocaleString('zh-CN'),
       },
     }
@@ -3806,7 +4082,14 @@ export default function App() {
         prompt: '',
         status: 'idle',
         model: options.outputKind === 'video' ? apiConfig.videoModel : apiConfig.model,
+        imageSize: options.outputKind === 'image' ? apiConfig.imageSize : undefined,
         size: apiConfig.size || defaultApiConfig.size,
+        ...(options.outputKind === 'video'
+          ? {
+              videoResolution: findApiMartVideoModel(apiConfig.videoModel).defaultResolution,
+              videoDuration: findApiMartVideoModel(apiConfig.videoModel).defaultDuration,
+            }
+          : {}),
         createdAt,
       },
     }
@@ -4169,6 +4452,73 @@ export default function App() {
     reader.readAsDataURL(file)
     event.target.value = ''
   }
+
+  useEffect(() => {
+    const handlePasteImage = (event: ClipboardEvent) => {
+      const target = event.target instanceof HTMLElement ? event.target : null
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
+      if (showSettings || showModelStudio || showHistoryPanel || historyImagePreview || groupDialog) return
+
+      const clipboardData = event.clipboardData
+      const itemFile = Array.from(clipboardData?.items || [])
+        .find((item) => item.kind === 'file' && item.type.startsWith('image/'))
+        ?.getAsFile()
+      const file = itemFile || Array.from(clipboardData?.files || []).find((candidate) => candidate.type.startsWith('image/'))
+      if (!file) return
+
+      event.preventDefault()
+      const canvasCenter = flowInstance?.screenToFlowPosition(
+        { x: window.innerWidth / 2, y: window.innerHeight / 2 },
+        { snapToGrid: true, snapGrid: [24, 24] },
+      )
+      const offset = (nodes.length % 6) * 20
+      const nodePosition = canvasCenter
+        ? { x: canvasCenter.x - 165 + offset, y: canvasCenter.y - 190 + offset }
+        : { x: 120 + nodes.length * 24, y: 140 + nodes.length * 24 }
+
+      void imageFileAsDataUrl(file)
+        .then((imageUrl) => {
+          const extension = file.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
+          const sourceName = file.name || `剪贴板图片-${Date.now()}.${extension}`
+          const node: WorkflowNode = {
+            id: id('ref'),
+            type: 'workflow',
+            position: nodePosition,
+            selected: true,
+            data: {
+              kind: 'reference',
+              title: '参考图像',
+              imageUrl,
+              status: 'done',
+              model: '剪贴板',
+              size: apiConfig.size,
+              sourceName,
+              createdAt: new Date().toLocaleString('zh-CN'),
+            },
+          }
+
+          setNodes((current) => [...current.map((item) => ({ ...item, selected: false })), node])
+          setSelectedNodeId(node.id)
+          markDirty()
+          setToast('剪贴板图片已粘贴为参考图。')
+        })
+        .catch((error) => setToast(error instanceof Error ? error.message : '粘贴图片失败，请重新复制。'))
+    }
+
+    window.addEventListener('paste', handlePasteImage)
+    return () => window.removeEventListener('paste', handlePasteImage)
+  }, [
+    apiConfig.size,
+    flowInstance,
+    groupDialog,
+    historyImagePreview,
+    markDirty,
+    nodes.length,
+    setNodes,
+    showHistoryPanel,
+    showModelStudio,
+    showSettings,
+  ])
 
   function addModelPreviewToCanvas(result: { dataUrl: string; fileName: string; width: number; height: number }) {
     const canvasCenter = flowInstance?.screenToFlowPosition(
@@ -4882,8 +5232,9 @@ export default function App() {
                   <option value="custom">自定义 JSON API</option>
                 </select>
               </label>
-              <div className="field">
-                <span>模型</span>
+              {apiConfig.mode !== 'apimart' && (
+                <div className="field">
+                  <span>模型</span>
                 {apiConfig.mode === 'grsai' ? (
                   <select aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })}>
                     {grsAiModelGroups.map((group) => (
@@ -4919,7 +5270,7 @@ export default function App() {
                       </button>
                     </div>
                     <small className="change2pro-family-help">
-                      切换模型系列时会自动载入对应的 Endpoint、API Key、模型与清晰度。
+                      切换模型系列时会自动载入对应的 API 配置、API Key、模型与清晰度。
                     </small>
                     <div className="change2pro-model-picker">
                       <select
@@ -4998,111 +5349,21 @@ export default function App() {
                       {agnesModelMessage || '官方生图模型：Agnes Image 2.1 Flash、Agnes Image 2.0 Flash。'}
                     </small>
                   </>
-                ) : apiConfig.mode === 'apimart' ? (
-                  <div className="apimart-model-stack">
-                    <section className="apimart-model-section">
-                      <strong>图像模型</strong>
-                      <select
-                        aria-label="API Mart 生图模型"
-                        value={apiConfig.model}
-                        onChange={(event) => {
-                          const model = findApiMartModel(event.target.value)
-                          updateApiConfig({ model: model.id, imageSize: model.defaultResolution })
-                        }}
-                      >
-                        {apiMartModels.map((model) => (
-                          <option key={model.id} value={model.id}>{model.label}</option>
-                        ))}
-                      </select>
-                      <div className="change2pro-resolution-section">
-                        <div className="change2pro-resolution-head">
-                          <span>图像清晰度</span>
-                          <small>按模型过滤</small>
-                        </div>
-                        <div className="change2pro-resolution-picker" role="group" aria-label="API Mart 图像输出清晰度">
-                          {findApiMartModel(apiConfig.model).resolutions.map((imageSize) => (
-                            <button
-                              className={apiConfig.imageSize === imageSize ? 'active' : ''}
-                              type="button"
-                              aria-pressed={apiConfig.imageSize === imageSize}
-                              onClick={() => updateApiConfig({ imageSize })}
-                              key={imageSize}
-                            >
-                              {imageSize}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </section>
-                    <section className="apimart-model-section">
-                      <strong>视频模型</strong>
-                      <select
-                        aria-label="API Mart 视频模型"
-                        value={apiConfig.videoModel}
-                        onChange={(event) => {
-                          const model = findApiMartVideoModel(event.target.value)
-                          updateApiConfig({
-                            videoModel: model.id,
-                            videoResolution: model.defaultResolution,
-                            videoDuration: model.defaultDuration,
-                          })
-                        }}
-                      >
-                        {apiMartVideoModels.map((model) => (
-                          <option key={model.id} value={model.id}>{model.label}</option>
-                        ))}
-                      </select>
-                      <div className="change2pro-resolution-section">
-                        <div className="change2pro-resolution-head">
-                          <span>视频清晰度</span>
-                          <small>按模型过滤</small>
-                        </div>
-                        <div className="change2pro-resolution-picker" role="group" aria-label="API Mart 视频输出清晰度">
-                          {findApiMartVideoModel(apiConfig.videoModel).resolutions.map((videoResolution) => (
-                            <button
-                              className={apiConfig.videoResolution === videoResolution ? 'active' : ''}
-                              type="button"
-                              aria-pressed={apiConfig.videoResolution === videoResolution}
-                              onClick={() => updateApiConfig({ videoResolution })}
-                              key={videoResolution}
-                            >
-                              {videoResolution}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      <label className="apimart-duration-field">
-                        <span>视频时长</span>
-                        <input
-                          type="number"
-                          min={findApiMartVideoModel(apiConfig.videoModel).minDuration}
-                          max={findApiMartVideoModel(apiConfig.videoModel).maxDuration}
-                          step={1}
-                          value={apiConfig.videoDuration}
-                          onChange={(event) => updateApiConfig({ videoDuration: Number(event.target.value) })}
-                        />
-                        <small>秒 · {findApiMartVideoModel(apiConfig.videoModel).minDuration}–{findApiMartVideoModel(apiConfig.videoModel).maxDuration}</small>
-                      </label>
-                    </section>
-                    <small className="change2pro-model-message success">
-                      已接入 5 个图像模型和 3 个视频模型，任务会自动等待并读取最终结果。
-                    </small>
-                  </div>
                 ) : (
                   <input aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })} />
                 )}
-              </div>
-              <label className="field wide">
-                <span>
-                  Endpoint
-                  {apiConfig.mode === 'change2pro' && ` · ${(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2' ? 'Image 2' : 'Nano Banana'}`}
-                </span>
-                <input
-                  value={apiConfig.endpoint}
-                  onChange={(event) => updateApiConfig({ endpoint: event.target.value })}
-                  placeholder="https://api.example.com/v1/images/generations"
-                />
-              </label>
+                </div>
+              )}
+              {(apiConfig.mode === 'openai' || apiConfig.mode === 'custom') && (
+                <label className="field wide">
+                  <span>Endpoint</span>
+                  <input
+                    value={apiConfig.endpoint}
+                    onChange={(event) => updateApiConfig({ endpoint: event.target.value })}
+                    placeholder="https://api.example.com/v1/images/generations"
+                  />
+                </label>
+              )}
               <label className="field wide">
                 <span>
                   API Key

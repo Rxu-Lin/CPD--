@@ -2,7 +2,7 @@ import { defineConfig, type Plugin, type ViteDevServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { ZipArchive, type ArchiverError } from 'archiver'
 import { Open as ZipOpen } from 'unzipper'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { createReadStream, createWriteStream } from 'node:fs'
@@ -12,6 +12,7 @@ import { isIP } from 'node:net'
 import path from 'node:path'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { ProxyAgent, type Dispatcher } from 'undici'
 import {
   defaultGrsAiModel,
   findGrsAiModel,
@@ -26,6 +27,77 @@ const projectCacheDir = path.resolve(process.cwd(), '.project-cache')
 const runtimeImageSessionId = '00000000-0000-4000-8000-000000000000'
 const runtimeImagesDir = path.join(projectCacheDir, runtimeImageSessionId, 'images')
 const generationRateLimits = new Map<string, { count: number; startedAt: number }>()
+
+let upstreamProxyDispatcher: Dispatcher | null | undefined
+
+function normalizeProxyUrl(value?: string) {
+  const rawValue = value?.trim()
+  if (!rawValue) return undefined
+
+  const proxyEntries = rawValue
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+  const httpsEntry = proxyEntries.find((entry) => entry.toLowerCase().startsWith('https='))
+  const httpEntry = proxyEntries.find((entry) => entry.toLowerCase().startsWith('http='))
+  const selected = (httpsEntry || httpEntry || proxyEntries[0] || '')
+    .replace(/^(?:https?|socks(?:4|5)?)=/i, '')
+    .trim()
+  if (!selected) return undefined
+
+  try {
+    const url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(selected) ? selected : `http://${selected}`)
+    return ['http:', 'https:'].includes(url.protocol) ? url.toString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function windowsProxyUrl() {
+  if (process.platform !== 'win32') return undefined
+
+  try {
+    const registryPath = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
+    const proxyEnabled = execFileSync('reg', ['query', registryPath, '/v', 'ProxyEnable'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+    if (!/ProxyEnable\s+REG_DWORD\s+0x1\b/i.test(proxyEnabled)) return undefined
+
+    const proxySetting = execFileSync('reg', ['query', registryPath, '/v', 'ProxyServer'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+    return normalizeProxyUrl(proxySetting.match(/ProxyServer\s+REG_SZ\s+(.+)$/im)?.[1])
+  } catch {
+    return undefined
+  }
+}
+
+function configuredProxyUrl() {
+  return normalizeProxyUrl(
+    process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.HTTP_PROXY ||
+      process.env.http_proxy,
+  ) || windowsProxyUrl()
+}
+
+function shouldUseUpstreamProxy(endpoint: string) {
+  try {
+    const hostname = new URL(endpoint).hostname.toLowerCase()
+    return hostname === 'apimart.ai' || hostname.endsWith('.apimart.ai')
+  } catch {
+    return false
+  }
+}
+
+function getUpstreamProxyDispatcher() {
+  if (upstreamProxyDispatcher !== undefined) return upstreamProxyDispatcher || undefined
+  const proxyUrl = configuredProxyUrl()
+  upstreamProxyDispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : null
+  return upstreamProxyDispatcher || undefined
+}
 
 type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'agnes' | 'apimart' | 'custom'
 type ImageResolutionTier = '1K' | '1.5K' | '2K' | '3K' | '4K'
@@ -113,6 +185,15 @@ async function validateUpstreamEndpoint(endpoint: string) {
     throw new Error('API Endpoint 不能指向内网地址')
   }
   return url.toString()
+}
+
+async function fetchUpstream(endpoint: string, init?: RequestInit) {
+  const validatedEndpoint = await validateUpstreamEndpoint(endpoint)
+  const dispatcher = shouldUseUpstreamProxy(validatedEndpoint) ? getUpstreamProxyDispatcher() : undefined
+  const requestInit = dispatcher
+    ? ({ ...init, dispatcher } as unknown as RequestInit)
+    : init
+  return fetch(validatedEndpoint, requestInit)
 }
 
 function consumeGenerationQuota(req: IncomingMessage) {
@@ -886,7 +967,7 @@ function parseJsonLikeResponse(text: string) {
 async function postJson(endpoint: string, headers: Record<string, string>, payload: unknown, resource = '图像') {
   let response: Response
   try {
-    response = await fetch(await validateUpstreamEndpoint(endpoint), {
+    response = await fetchUpstream(endpoint, {
       method: 'POST',
       headers: {
         ...headers,
@@ -911,7 +992,7 @@ async function postJson(endpoint: string, headers: Record<string, string>, paylo
 async function getJson(endpoint: string, headers: Record<string, string>, resource = '图像') {
   let response: Response
   try {
-    response = await fetch(await validateUpstreamEndpoint(endpoint), {
+    response = await fetchUpstream(endpoint, {
       method: 'GET',
       headers,
     })
@@ -1592,9 +1673,12 @@ async function uploadApiMartReferenceImage(
   imageUrl: string,
   index: number,
 ) {
-  if (!shouldInlineGrsAiReference(imageUrl)) return imageUrl
+  const normalizedImageUrl = imageUrl.trim()
+  const isApiMartAssetUrl = /^asset:\/\//i.test(normalizedImageUrl)
+  const isPublicHttpUrl = /^https?:\/\//i.test(normalizedImageUrl) && !shouldInlineGrsAiReference(normalizedImageUrl)
+  if (isApiMartAssetUrl || isPublicHttpUrl) return normalizedImageUrl
 
-  const image = await loadImageBuffer(imageUrl)
+  const image = await loadImageBuffer(normalizedImageUrl)
   validateReferenceImage(image, index)
   const form = new FormData()
   form.append(
@@ -1606,7 +1690,7 @@ async function uploadApiMartReferenceImage(
   const uploadEndpoint = apiMartUploadImageEndpoint(generationEndpoint)
   let response: Response
   try {
-    response = await fetch(await validateUpstreamEndpoint(uploadEndpoint), {
+    response = await fetchUpstream(uploadEndpoint, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
