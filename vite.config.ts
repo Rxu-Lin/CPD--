@@ -99,7 +99,7 @@ function getUpstreamProxyDispatcher() {
   return upstreamProxyDispatcher || undefined
 }
 
-type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'agnes' | 'apimart' | 'custom'
+type ApiMode = 'mock' | 'grsai' | 'change2pro' | 'apimart'
 type ImageResolutionTier = '1K' | '1.5K' | '2K' | '3K' | '4K'
 type GptImageResolutionTier = '1K' | '2K' | '4K'
 type VideoResolutionTier = '480p' | '720p' | '768P' | '1080p' | '2K' | '4k'
@@ -114,8 +114,6 @@ type ApiConfig = {
   videoResolution?: VideoResolutionTier
   videoDuration?: number
   size: string
-  bodyTemplate: string
-  responsePath: string
 }
 
 function readBody(req: IncomingMessage) {
@@ -1126,27 +1124,9 @@ async function requestGrsAiImage(config: ApiConfig, prompt: string, referenceIma
   throw new Error('GrsAI generation timed out. Please try again later.')
 }
 
-function imagePayloadFromDataUrl(imageUrl?: string) {
-  if (!imageUrl?.startsWith('data:image/')) return ''
-  return imageUrl.slice(imageUrl.indexOf(',') + 1)
-}
-
 function referenceImageUrlsFromBody(body: { referenceImageUrl?: string; referenceImageUrls?: string[] }) {
   if (Array.isArray(body.referenceImageUrls)) return body.referenceImageUrls.filter((url): url is string => typeof url === 'string' && Boolean(url))
   return body.referenceImageUrl ? [body.referenceImageUrl] : []
-}
-
-function buildCustomBody(config: ApiConfig, prompt: string, referenceImageUrl?: string, maskUrl?: string) {
-  const filled = (config.bodyTemplate || '')
-    .replaceAll('{prompt}', prompt.replaceAll('"', '\\"'))
-    .replaceAll('{model}', config.model)
-    .replaceAll('{size}', config.size)
-    .replaceAll('{referenceImageUrl}', referenceImageUrl?.replaceAll('"', '\\"') || '')
-    .replaceAll('{referenceImageBase64}', imagePayloadFromDataUrl(referenceImageUrl))
-    .replaceAll('{maskImageUrl}', maskUrl?.replaceAll('"', '\\"') || '')
-    .replaceAll('{maskImageBase64}', imagePayloadFromDataUrl(maskUrl))
-
-  return JSON.parse(filled)
 }
 
 function openAiEditEndpoint(endpoint: string) {
@@ -1160,7 +1140,6 @@ function isImageGenerationModel(modelId: string) {
   const id = modelId.trim().toLowerCase().replaceAll('_', '-').replaceAll('.', '-')
   return [
     /gpt-?image/,
-    /agnes-?image/,
     /nano-?banana/,
     /grok.*(?:image|imagine)/,
     /gemini.*image/,
@@ -1339,79 +1318,6 @@ async function requestChange2ProModelList(apiKey: string) {
     throw new UpstreamHttpError('当前 Key 没有返回可识别的生图模型，请确认该 Key 所属分组包含图像能力。', 400)
   }
   return { models }
-}
-
-function agnesModelsEndpoint(endpoint: string) {
-  const url = new URL(endpoint)
-  const versionIndex = url.pathname.indexOf('/v1')
-  url.pathname = `${versionIndex >= 0 ? url.pathname.slice(0, versionIndex) : ''}/v1/models`
-  url.search = ''
-  return url.toString()
-}
-
-async function requestAgnesModelList(apiKey: string, endpoint: string) {
-  if (!apiKey.trim()) throw new UpstreamHttpError('请先填写 Agnes AI API Key。', 400)
-  if (!endpoint.trim()) throw new UpstreamHttpError('请先填写 Agnes AI Endpoint。', 400)
-  const modelsEndpoint = agnesModelsEndpoint(endpoint.trim())
-
-  let response: Response
-  try {
-    response = await fetch(await validateUpstreamEndpoint(modelsEndpoint), {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${apiKey.trim()}` },
-    })
-  } catch (error) {
-    throw new Error(formatUpstreamFetchError(error, modelsEndpoint))
-  }
-
-  const text = await response.text()
-  const json = parseJsonLikeResponse(text)
-  if (!response.ok) {
-    const detail = knownErrorText(json)
-    throw new UpstreamHttpError(
-      detail
-        ? `Agnes AI 模型列表读取失败（${response.status}）：${detail}`
-        : `Agnes AI 模型列表读取失败（${response.status} ${response.statusText}）。`,
-      response.status,
-    )
-  }
-
-  const models = change2ProModelsFromResponse(json).filter((model) => /^agnes-image-/i.test(model.id))
-  if (!models.length) {
-    throw new UpstreamHttpError('当前 Agnes AI Key 没有返回可用的生图模型。', 400)
-  }
-  return { models }
-}
-
-async function requestAgnesImage(config: ApiConfig, prompt: string, referenceImageUrls: string[]) {
-  if (!config.apiKey?.trim()) throw new UpstreamHttpError('请先填写 Agnes AI API Key。', 400)
-
-  const payload: Record<string, unknown> = {
-    model: config.model,
-    prompt,
-    size: config.size,
-    n: 1,
-  }
-
-  if (referenceImageUrls.length) {
-    const images = await Promise.all(
-      referenceImageUrls.map(async (imageUrl, index) => {
-        const image = await loadImageBuffer(imageUrl)
-        validateReferenceImage(image, index)
-        return image.buffer.toString('base64')
-      }),
-    )
-    payload.extra_body = {
-      image: images,
-      response_format: 'b64_json',
-    }
-  }
-
-  return postJson(
-    config.endpoint.trim(),
-    { Authorization: `Bearer ${config.apiKey.trim()}` },
-    payload,
-  )
 }
 
 const apiMartModelConfigs: Record<
@@ -1799,11 +1705,8 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
 
   if (!config) throw new Error('缺少 API 配置')
   if (!prompt) throw new Error('缺少提示词')
-  if (config.mode === 'mock') throw new Error('当前仍是本地模拟模式，请切换到 OpenAI 或自定义 API')
+  if (config.mode === 'mock') throw new Error('当前仍是本地模拟模式，请在 API 设置中选择可用接口')
   if (!config.endpoint?.trim()) throw new Error('请先填写 API Endpoint')
-  if (config.mode === 'agnes') {
-    return requestAgnesImage(config, prompt, referenceImageUrls)
-  }
   if (config.mode === 'apimart') {
     return requestApiMartImage(config, prompt, referenceImageUrls)
   }
@@ -1811,13 +1714,14 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
     return requestChange2ProGeminiImage(config, prompt, referenceImageUrls, body.maskUrl)
   }
 
-  const isOpenAiCompatible = config.mode === 'openai' || config.mode === 'change2pro'
-  const endpoint = isOpenAiCompatible && firstReferenceImageUrl ? openAiEditEndpoint(config.endpoint.trim()) : config.endpoint.trim()
+  if (config.mode !== 'change2pro') throw new UpstreamHttpError('当前 API 模式不支持此图像请求。', 400)
+
+  const endpoint = firstReferenceImageUrl ? openAiEditEndpoint(config.endpoint.trim()) : config.endpoint.trim()
   const headers: Record<string, string> = config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}
   const outputSize = config.mode === 'change2pro' ? change2ProOutputSize(config) : config.size
   let requestBody: string | FormData
 
-  if (isOpenAiCompatible && firstReferenceImageUrl) {
+  if (firstReferenceImageUrl) {
     const image = await loadImageBuffer(firstReferenceImageUrl)
     validateReferenceImage(image, 0)
     const form = new FormData()
@@ -1834,10 +1738,7 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
     requestBody = form
   } else {
     headers['Content-Type'] = 'application/json'
-    const upstreamBody =
-      isOpenAiCompatible
-        ? { model: config.model, prompt, size: outputSize, n: 1 }
-        : buildCustomBody(config, prompt, firstReferenceImageUrl, body.maskUrl)
+    const upstreamBody = { model: config.model, prompt, size: outputSize, n: 1 }
     requestBody = JSON.stringify(upstreamBody)
   }
 
@@ -1893,27 +1794,6 @@ function localImageLibraryPlugin(): Plugin {
           const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
           sendJson(res, statusCode, {
             error: error instanceof Error ? error.message : 'Change2Pro 模型列表读取失败',
-          })
-        }
-      })
-
-      server.middlewares.use('/api/agnes/models', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
-        if (req.method !== 'POST') {
-          next()
-          return
-        }
-
-        try {
-          const body = JSON.parse(await readBody(req)) as { apiKey?: string; endpoint?: string }
-          const result = await requestAgnesModelList(
-            body.apiKey || '',
-            body.endpoint || 'https://api.agnes-ai.cn/v1/images/generations',
-          )
-          sendJson(res, 200, result)
-        } catch (error) {
-          const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
-          sendJson(res, statusCode, {
-            error: error instanceof Error ? error.message : 'Agnes AI 模型列表读取失败',
           })
         }
       })

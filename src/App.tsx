@@ -44,6 +44,7 @@ import {
   History,
   Image as ImageIcon,
   KeyRound,
+  Lightbulb,
   Loader2,
   Pencil,
   RefreshCw,
@@ -58,7 +59,7 @@ import {
   X,
 } from 'lucide-react'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
-import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
 import SpecularButton from './SpecularButton'
@@ -148,7 +149,14 @@ function repaintPromptBody(prompt: string) {
 function repaintPromptWithColor(prompt: string, brushColor: RepaintBrushColor) {
   return `${repaintBrushOptions[brushColor].prefix}${repaintPromptBody(prompt)}`
 }
-type ApiMode = 'mock' | 'openai' | 'grsai' | 'change2pro' | 'agnes' | 'apimart' | 'custom'
+type ApiMode = 'mock' | 'grsai' | 'change2pro' | 'apimart'
+
+const apiModeOptions: Array<{ value: ApiMode; label: string }> = [
+  { value: 'grsai', label: 'GA 全部生图模型' },
+  { value: 'change2pro', label: 'Change2Pro 生图模型' },
+  { value: 'apimart', label: 'API Mart 图像 / 视频' },
+  { value: 'mock', label: '本地模拟' },
+]
 type AspectRatioValue = '16:9' | '3:2' | '4:3' | '1:1' | '3:4' | '2:3' | '9:16'
 type ImageResolutionTier = '1K' | '1.5K' | '2K' | '3K' | '4K'
 type VideoResolutionTier = '480p' | '720p' | '768P' | '1080p' | '2K' | '4k'
@@ -164,8 +172,6 @@ type ApiConfig = {
   videoResolution: VideoResolutionTier
   videoDuration: number
   size: string
-  bodyTemplate: string
-  responsePath: string
   change2ProFamily?: Change2ProApiFamily
 }
 
@@ -211,11 +217,18 @@ type ImageInputSlot = {
   connected: boolean
 }
 
+type LightDirection = {
+  x: number
+  y: number
+  enabled: boolean
+}
+
 type WorkflowNodeData = {
   kind: NodeKind
   apiMode?: ApiMode
   title: string
   prompt?: string
+  generationPrompt?: string
   imageUrl?: string
   videoUrl?: string
   sourceImageUrl?: string
@@ -232,6 +245,7 @@ type WorkflowNodeData = {
   size?: string
   videoResolution?: VideoResolutionTier
   videoDuration?: number
+  lightDirection?: LightDirection
   sourceName?: string
   error?: string
   createdAt: string
@@ -251,6 +265,9 @@ type WorkflowNodeData = {
   onChangeSize?: (id: string, size: string) => void
   onChangeVideoResolution?: (id: string, resolution: VideoResolutionTier) => void
   onChangeVideoDuration?: (id: string, duration: number) => void
+  onChangeLightDirection?: (id: string, direction: LightDirection) => void
+  onOpenLightDirection?: (id: string) => void
+  onCreateRepaint?: (id: string) => void
   onChangePrompt?: (id: string, prompt: string) => void
   onChangeMask?: (id: string, maskUrl: string) => void
   onChangeBrush?: (id: string, brushSize: number) => void
@@ -324,6 +341,61 @@ function promptWithReferenceImageOrder(prompt: string, referenceImageCount: numb
   return `${prompt}\n\n参考图顺序说明：参考图已按画布端口编号依次传入（${labels}）。请严格按该编号理解图片；提示词提到 Image N 时，对应同名编号的参考图。`
 }
 
+const defaultLightDirection: LightDirection = {
+  x: -Math.SQRT1_2,
+  y: -Math.SQRT1_2,
+  enabled: false,
+}
+
+const lightDirectionLabels = ['正上方', '右上方', '右侧', '右下方', '正下方', '左下方', '左侧', '左上方'] as const
+
+function normalizeLightDirection(value?: Partial<LightDirection>): LightDirection {
+  const rawX = Number(value?.x)
+  const rawY = Number(value?.y)
+  let x = Number.isFinite(rawX) ? rawX : defaultLightDirection.x
+  let y = Number.isFinite(rawY) ? rawY : defaultLightDirection.y
+  const magnitude = Math.hypot(x, y)
+  if (magnitude > 1) {
+    x /= magnitude
+    y /= magnitude
+  }
+  return {
+    x: Math.round(x * 1000) / 1000,
+    y: Math.round(y * 1000) / 1000,
+    enabled: Boolean(value?.enabled),
+  }
+}
+
+function lightDirectionMetadata(value?: Partial<LightDirection>) {
+  const direction = normalizeLightDirection(value)
+  const magnitude = Math.hypot(direction.x, direction.y)
+  if (magnitude < 0.12) {
+    return {
+      direction,
+      label: '正前方',
+      oppositeLabel: '产品后方',
+      angle: 0,
+    }
+  }
+  const angle = (Math.atan2(direction.x, -direction.y) * 180 / Math.PI + 360) % 360
+  const index = Math.round(angle / 45) % lightDirectionLabels.length
+  return {
+    direction,
+    label: lightDirectionLabels[index],
+    oppositeLabel: lightDirectionLabels[(index + 4) % lightDirectionLabels.length],
+    angle: Math.round(angle),
+  }
+}
+
+function promptWithLightDirection(prompt: string, value?: Partial<LightDirection>) {
+  const metadata = lightDirectionMetadata(value)
+  if (!metadata.direction.enabled) return prompt
+  if (metadata.label === '正前方') {
+    return `${prompt}\n\n灯光方向控制：主光源位于镜头正前方，正面照射产品。重新塑造正面高光与材质反射，暗部向产品后方自然过渡。保持产品外形、包装结构、品牌标识、文字内容、原始色彩、比例、摆放状态、角度与构图不变，仅调整光影。`
+  }
+  return `${prompt}\n\n灯光方向控制：主光源从画面${metadata.label}照向产品，高光重点落在产品${metadata.label}一侧，暗部和阴影向画面${metadata.oppositeLabel}自然过渡。重新塑造真实、干净、可控的材质高光与反射。保持产品外形、包装结构、品牌标识、文字内容、原始色彩、比例、摆放状态、角度与构图不变，仅调整光影。`
+}
+
 type ProjectFile = {
   version: 1 | 2
   projectName: string
@@ -371,27 +443,25 @@ type GroupDialogState =
 const API_STORAGE_KEY = 'node-banana-api-config'
 const API_PROFILE_STORAGE_KEY_PREFIX = 'node-banana-api-profile:'
 const CHANGE2PRO_FAMILY_PROFILE_KEY_PREFIX = 'node-banana-change2pro-profile:'
+const removedApiModes = ['agnes', 'openai', 'custom', 'volcengine'] as const
 const workflowEdgeColor = 'rgba(255, 255, 255, 0.88)'
 
 const defaultApiConfig: ApiConfig = {
   mode: 'mock',
-  endpoint: 'https://api.openai.com/v1/images/generations',
+  endpoint: '',
   apiKey: '',
-  model: 'gpt-image-1',
+  model: 'local-simulated',
   imageSize: '1K',
   videoModel: 'seedance-2.5',
   videoResolution: '720p',
   videoDuration: 5,
   size: '1024x1024',
-  bodyTemplate: '{\n  "model": "{model}",\n  "prompt": "{prompt}",\n  "size": "{size}",\n  "n": 1\n}',
-  responsePath: 'data.0.url',
 }
 
 const grsAiApiConfig: Partial<ApiConfig> = {
   mode: 'grsai',
   endpoint: grsAiDefaultEndpoint,
   model: defaultGrsAiModel,
-  responsePath: 'data.0.url',
 }
 
 const change2ProApiConfig: Partial<ApiConfig> = {
@@ -399,16 +469,7 @@ const change2ProApiConfig: Partial<ApiConfig> = {
   endpoint: 'https://api.change2pro.com/v1/images/generations',
   model: 'gpt-image-2',
   imageSize: '1K',
-  responsePath: 'data.0.url',
   change2ProFamily: 'image2',
-}
-
-const agnesApiConfig: Partial<ApiConfig> = {
-  mode: 'agnes',
-  endpoint: 'https://api.agnes-ai.cn/v1/images/generations',
-  model: 'agnes-image-2.1-flash',
-  imageSize: '1K',
-  responsePath: 'data.0.url',
 }
 
 const apiMartApiConfig: Partial<ApiConfig> = {
@@ -419,7 +480,6 @@ const apiMartApiConfig: Partial<ApiConfig> = {
   videoModel: 'seedance-2.5',
   videoResolution: '720p',
   videoDuration: 5,
-  responsePath: 'data.0.url',
 }
 
 const apiMartModels: ApiMartModelOption[] = [
@@ -493,14 +553,7 @@ function findApiMartVideoModel(model?: string) {
   return apiMartVideoModels.find((option) => option.id === model) ?? apiMartVideoModels[0]
 }
 
-const agnesFallbackModels: Change2ProModelOption[] = [
-  { id: 'agnes-image-2.1-flash', ownedBy: 'Agnes AI' },
-  { id: 'agnes-image-2.0-flash', ownedBy: 'Agnes AI' },
-]
-
 function apiModelDisplayName(model: string) {
-  if (model === 'agnes-image-2.1-flash') return 'Agnes Image 2.1 Flash'
-  if (model === 'agnes-image-2.0-flash') return 'Agnes Image 2.0 Flash'
   const apiMartModel = apiMartModels.find((option) => option.id === model)
   if (apiMartModel) return apiMartModel.label
   const apiMartVideoModel = apiMartVideoModels.find((option) => option.id === model)
@@ -514,6 +567,19 @@ function apiProfileStorageKey(mode: ApiMode) {
 
 function change2ProFamilyProfileKey(family: Change2ProApiFamily) {
   return `${CHANGE2PRO_FAMILY_PROFILE_KEY_PREFIX}${family}`
+}
+
+function sanitizeStoredApiValue(key: string) {
+  const saved = window.localStorage.getItem(key)
+  if (!saved) return
+  try {
+    const { bodyTemplate: _bodyTemplate, responsePath: _responsePath, ...config } = JSON.parse(saved) as Record<string, unknown>
+    void _bodyTemplate
+    void _responsePath
+    window.localStorage.setItem(key, JSON.stringify(config))
+  } catch {
+    window.localStorage.removeItem(key)
+  }
 }
 
 function change2ProFamilyFromModel(model: string): Change2ProApiFamily {
@@ -549,8 +615,16 @@ function writeStoredChange2ProFamilyProfile(family: Change2ProApiFamily, config:
 
 function readStoredApiProfile(mode: ApiMode) {
   try {
+    if (mode === 'mock') {
+      window.localStorage.removeItem(apiProfileStorageKey(mode))
+      return null
+    }
     const saved = window.localStorage.getItem(apiProfileStorageKey(mode))
-    return saved ? (JSON.parse(saved) as Partial<ApiConfig>) : null
+    if (!saved) return null
+    const { bodyTemplate: _bodyTemplate, responsePath: _responsePath, ...profile } = JSON.parse(saved) as Record<string, unknown>
+    void _bodyTemplate
+    void _responsePath
+    return profile as Partial<ApiConfig>
   } catch {
     return null
   }
@@ -559,10 +633,7 @@ function readStoredApiProfile(mode: ApiMode) {
 function apiModePreset(mode: ApiMode): Partial<ApiConfig> {
   if (mode === 'grsai') return grsAiApiConfig
   if (mode === 'change2pro') return change2ProApiConfig
-  if (mode === 'agnes') return agnesApiConfig
   if (mode === 'apimart') return apiMartApiConfig
-  if (mode === 'openai') return { mode, endpoint: defaultApiConfig.endpoint, model: defaultApiConfig.model }
-  if (mode === 'custom') return { mode, endpoint: '', model: '', responsePath: 'data.0.url' }
   return { ...defaultApiConfig, mode: 'mock' }
 }
 
@@ -692,8 +763,16 @@ function getReferenceImageRatio(width: number, height: number) {
 const starterPrompt =
   '一张未来感产品海报，深色背景，蓝色霓虹边缘光，主体是一台半透明的智能设备，电影级布光，高细节'
 
-const productRetouchPrompt =
-  '对原图中的美妆产品进行商业广告级精修，保持产品外形、包装结构、品牌标识、文字内容和真实颜色准确不变。清除灰尘、指纹、划痕、污渍、毛边及包装瑕疵，优化瓶身、管身或膏体表面的质感与细节；校正透视和边缘，使轮廓清晰自然。重塑专业棚拍光影，增强玻璃、金属、塑料、磨砂或膏体材质的真实表现，控制高光不过曝、阴影柔和有层次。提升画面通透度、色彩纯净度和局部对比度，避免过度锐化、塑料感及不真实反光。背景保持干净高级，并增加自然接触阴影与轻微环境反射，使产品稳定落地。整体呈现高端美妆品牌广告风格，精致、纯净、真实、具有购买吸引力，超高清细节，适用于电商主图、海报和社交媒体宣传。禁止改变产品比例、Logo、包装文字、色号、材质和核心设计，不添加不存在的装饰或配件。'
+const productRetouchPrompt = `提取原图中的美妆产品，对产品进行商业广告级精修与重新打光。保持产品外形、包装结构、品牌标识、文字内容、原始色彩不变，不改变产品比例、摆放状态和角度。
+
+清除灰尘、指纹、划痕、污渍、毛边、褶皱、包装瑕疵及不必要的杂物，使产品呈现如全新无瑕的状态。校正透视、边缘与轮廓，保证包装细节清晰、自然、精致。
+
+重建专业建模级棚拍光影：重新塑造产品的高光、反射、过渡光与暗部层次，使打光干净、均匀、精确，提高设备的材质的质感和光泽。增强玻璃、金属、塑料、磨砂、陶瓷、纸盒或膏体等材质的真实质感、光泽与细节，高光细腻不过曝，反射真实可控，暗部干净有层次；避免过度锐化、塑料感、失真反光或不真实材质。
+
+将背景更换为纯净高级的纯白色背景，画面简洁、明亮、无杂色、无多余环境元素。若原图产品为浮空展示、悬浮构图或白底电商主图，保持产品浮空或原有状态，不添加地面、台面、投影、倒影或接触阴影；若原图明确为产品放置于地面或台面上，则保留并优化自然、克制的接触阴影与投影，体现稳定落地感。`
+
+const relightGenerationPrompt =
+  '以参考图为唯一视觉基础，仅重新调整产品与场景的灯光、高光、反射和明暗层次。严格保持原图中的产品外形、包装结构、品牌标识、文字内容、真实颜色、比例、摆放角度、背景内容与画面构图不变，不添加或删除任何物体。光影自然、干净、可控，高光不过曝，暗部保留材质细节。'
 
 function id(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -751,13 +830,62 @@ function getAbsoluteNodePosition(node: WorkflowNode, nodeValues: WorkflowNode[])
   return position
 }
 
+function findFreeWorkflowNodePosition(
+  preferred: XYPosition,
+  size: { width: number; height: number },
+  nodeValues: WorkflowNode[],
+) {
+  const gap = 38
+  const horizontalStep = size.width + 76
+  const verticalStep = size.height + 76
+  const verticalOffsets = [0, 1, -1, 2, -2]
+
+  for (let column = 0; column < 6; column += 1) {
+    for (const row of verticalOffsets) {
+      const candidate = {
+        x: preferred.x + column * horizontalStep,
+        y: preferred.y + row * verticalStep,
+      }
+      const overlaps = nodeValues.some((node) => {
+        const nodePosition = getAbsoluteNodePosition(node, nodeValues)
+        const nodeSize = getWorkflowNodeSize(node)
+        return (
+          candidate.x < nodePosition.x + nodeSize.width + gap &&
+          candidate.x + size.width + gap > nodePosition.x &&
+          candidate.y < nodePosition.y + nodeSize.height + gap &&
+          candidate.y + size.height + gap > nodePosition.y
+        )
+      })
+      if (!overlaps) return candidate
+    }
+  }
+
+  return { x: preferred.x + horizontalStep * 6, y: preferred.y }
+}
+
 function readStoredApiConfig() {
   try {
-    window.localStorage.removeItem(`${API_PROFILE_STORAGE_KEY_PREFIX}volcengine`)
+    removedApiModes.forEach((mode) => window.localStorage.removeItem(`${API_PROFILE_STORAGE_KEY_PREFIX}${mode}`))
+    window.localStorage.removeItem(apiProfileStorageKey('mock'))
+    ;(['grsai', 'change2pro', 'apimart'] satisfies ApiMode[]).forEach((mode) => {
+      sanitizeStoredApiValue(apiProfileStorageKey(mode))
+    })
+    ;(['image2', 'nanoBanana'] satisfies Change2ProApiFamily[]).forEach((family) => {
+      sanitizeStoredApiValue(change2ProFamilyProfileKey(family))
+    })
     const saved = window.localStorage.getItem(API_STORAGE_KEY)
-    const config = saved ? { ...defaultApiConfig, ...JSON.parse(saved) } : defaultApiConfig
-    if (config.mode === 'volcengine') {
+    if (!saved) return defaultApiConfig
+    const parsed = JSON.parse(saved) as Record<string, unknown>
+    if (removedApiModes.includes(String(parsed.mode) as (typeof removedApiModes)[number])) {
       window.localStorage.removeItem(API_STORAGE_KEY)
+      return defaultApiConfig
+    }
+    const { bodyTemplate: _bodyTemplate, responsePath: _responsePath, ...storedConfig } = parsed
+    void _bodyTemplate
+    void _responsePath
+    const config = { ...defaultApiConfig, ...storedConfig } as ApiConfig
+    if (config.mode === 'mock') {
+      window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(defaultApiConfig))
       return defaultApiConfig
     }
     if (config.mode === 'grsai') {
@@ -791,7 +919,8 @@ function readStoredApiConfig() {
           : videoModel.defaultDuration,
       }
     }
-    return config.apiKey?.trim() && config.mode === 'mock' ? { ...config, mode: 'openai' as const } : config
+    window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(config))
+    return config
   } catch {
     return defaultApiConfig
   }
@@ -805,6 +934,14 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onReplaceImage,
     onGenerate,
     onChangeSize,
+    onChangeImageModel,
+    onChangeImageSize,
+    onChangeVideoModel,
+    onChangeVideoResolution,
+    onChangeVideoDuration,
+    onChangeLightDirection,
+    onOpenLightDirection,
+    onCreateRepaint,
     onChangePrompt,
     onChangeMask,
     onChangeBrush,
@@ -815,6 +952,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onResetOutpaintPrompt,
     onUsePrompt,
     onRenameGroup,
+    apiMode,
     memberCount,
     ...data
   } = node.data
@@ -824,6 +962,14 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onReplaceImage
   void onGenerate
   void onChangeSize
+  void onChangeImageModel
+  void onChangeImageSize
+  void onChangeVideoModel
+  void onChangeVideoResolution
+  void onChangeVideoDuration
+  void onChangeLightDirection
+  void onOpenLightDirection
+  void onCreateRepaint
   void onChangePrompt
   void onChangeMask
   void onChangeBrush
@@ -834,6 +980,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onResetOutpaintPrompt
   void onUsePrompt
   void onRenameGroup
+  void apiMode
   void memberCount
   const transientNode = node as WorkflowNode & { resizing?: boolean }
   const { measured, selected, dragging, resizing, ...stableNode } = transientNode
@@ -1116,11 +1263,10 @@ function getValueByPath(source: unknown, path: string) {
     }, source)
 }
 
-function imageFromResponse(source: unknown, responsePath: string) {
-  const direct = getValueByPath(source, responsePath)
+function imageFromResponse(source: unknown) {
   const fallbackUrl = getValueByPath(source, 'data.0.url')
   const fallbackBase64 = getValueByPath(source, 'data.0.b64_json')
-  const value = direct ?? fallbackUrl ?? fallbackBase64
+  const value = fallbackUrl ?? fallbackBase64
 
   if (typeof value !== 'string' || !value) {
     throw new Error('接口响应中没有找到图片地址或 base64 图片。')
@@ -1148,7 +1294,7 @@ async function requestGeneratedImage(prompt: string, config: ApiConfig, referenc
     throw new Error(message)
   }
 
-  return imageFromResponse(json, config.responsePath)
+  return imageFromResponse(json)
 }
 
 function videoFromResponse(source: unknown) {
@@ -1193,23 +1339,6 @@ async function requestChange2ProModels(apiKey: string) {
     throw new Error(payload?.error || `模型列表读取失败：${response.status} ${response.statusText}`)
   }
   if (!payload?.models?.length) throw new Error('当前 Key 没有返回可识别的生图模型。')
-  return payload.models
-}
-
-async function requestAgnesModels(apiKey: string, endpoint: string) {
-  const response = await fetch('/api/agnes/models', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey, endpoint }),
-  })
-  const payload = (await response.json().catch(() => null)) as
-    | { models?: Change2ProModelOption[]; error?: string }
-    | null
-
-  if (!response.ok) {
-    throw new Error(payload?.error || `Agnes AI 模型列表读取失败：${response.status} ${response.statusText}`)
-  }
-  if (!payload?.models?.length) throw new Error('当前 Agnes AI Key 没有返回可用的生图模型。')
   return payload.models
 }
 
@@ -1660,6 +1789,216 @@ function OutpaintRangeEditor({
   )
 }
 
+function LightDirectionControl({
+  value,
+  disabled,
+  onChange,
+}: {
+  value?: LightDirection
+  disabled: boolean
+  onChange: (direction: LightDirection) => void
+}) {
+  const orbitRef = useRef<HTMLDivElement>(null)
+  const activePointerIdRef = useRef<number | null>(null)
+  const metadata = lightDirectionMetadata(value)
+  const direction = metadata.direction
+  const magnitude = Math.hypot(direction.x, direction.y)
+  const lampRadius = 40
+  const rayAngle = Math.atan2(direction.y, direction.x) * 180 / Math.PI
+
+  const updateFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const orbit = orbitRef.current
+    if (!orbit || disabled) return
+    const rect = orbit.getBoundingClientRect()
+    const radius = Math.max(1, Math.min(rect.width, rect.height) / 2 - 17)
+    let x = (event.clientX - (rect.left + rect.width / 2)) / radius
+    let y = (event.clientY - (rect.top + rect.height / 2)) / radius
+    const distance = Math.hypot(x, y)
+    if (distance > 1) {
+      x /= distance
+      y /= distance
+    }
+    onChange(normalizeLightDirection({ x, y, enabled: true }))
+  }
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (disabled) return
+    event.preventDefault()
+    event.stopPropagation()
+    activePointerIdRef.current = event.pointerId
+    event.currentTarget.setPointerCapture(event.pointerId)
+    updateFromPointer(event)
+  }
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (activePointerIdRef.current !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    updateFromPointer(event)
+  }
+
+  const stopDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (activePointerIdRef.current !== event.pointerId) return
+    activePointerIdRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  const moveWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (disabled) return
+    const step = event.shiftKey ? 0.2 : 0.08
+    let nextX = direction.x
+    let nextY = direction.y
+    if (event.key === 'ArrowLeft') nextX -= step
+    else if (event.key === 'ArrowRight') nextX += step
+    else if (event.key === 'ArrowUp') nextY -= step
+    else if (event.key === 'ArrowDown') nextY += step
+    else if (event.key === 'Home') {
+      nextX = defaultLightDirection.x
+      nextY = defaultLightDirection.y
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      onChange({ ...direction, enabled: !direction.enabled })
+      return
+    } else return
+    event.preventDefault()
+    event.stopPropagation()
+    onChange(normalizeLightDirection({ x: nextX, y: nextY, enabled: true }))
+  }
+
+  return (
+    <section className={`light-direction-control nodrag nopan nowheel ${direction.enabled ? 'enabled' : ''}`} aria-label="产品灯光方向">
+      <div className="light-direction-head">
+        <button
+          className="light-direction-toggle"
+          type="button"
+          aria-pressed={direction.enabled}
+          disabled={disabled}
+          onClick={() => onChange({ ...direction, enabled: !direction.enabled })}
+        >
+          <Lightbulb size={14} />
+          <span>{direction.enabled ? '灯光已开启' : '开启灯光'}</span>
+        </button>
+        <button
+          className="light-direction-reset"
+          type="button"
+          title="恢复左上方默认灯光"
+          aria-label="恢复左上方默认灯光"
+          disabled={disabled}
+          onClick={() => onChange({ ...defaultLightDirection, enabled: direction.enabled })}
+        >
+          <RefreshCw size={13} />
+          重置
+        </button>
+      </div>
+      <div className="light-direction-body">
+        <div
+          ref={orbitRef}
+          className="light-direction-orbit"
+          role="application"
+          tabIndex={disabled ? -1 : 0}
+          aria-disabled={disabled}
+          aria-label={`拖动灯光方向，当前${metadata.label}${metadata.label === '正前方' ? '' : `，方位 ${metadata.angle} 度`}`}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={stopDragging}
+          onPointerCancel={stopDragging}
+          onKeyDown={moveWithKeyboard}
+        >
+          <span
+            className="light-direction-ray"
+            style={{
+              width: `${magnitude * lampRadius}px`,
+              transform: `translateY(-50%) rotate(${rayAngle}deg)`,
+            }}
+            aria-hidden="true"
+          />
+          <span className="light-direction-product" aria-hidden="true"><Box size={16} /></span>
+          <span
+            className="light-direction-lamp"
+            style={{
+              left: `calc(50% + ${direction.x * lampRadius}px)`,
+              top: `calc(50% + ${direction.y * lampRadius}px)`,
+            }}
+            aria-hidden="true"
+          >
+            <Lightbulb size={15} />
+          </span>
+        </div>
+        <div className="light-direction-copy">
+          <strong>{metadata.label}</strong>
+          <span>{metadata.label === '正前方' ? '正面主光' : `${metadata.angle}° 方位`}</span>
+          <small>拖动灯光图标，高光同向，阴影反向</small>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function ApiModeSelect({ value, onChange }: { value: ApiMode; onChange: (mode: ApiMode) => void }) {
+  const pickerRef = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  const selectedOption = apiModeOptions.find((option) => option.value === value) ?? apiModeOptions[0]
+
+  useEffect(() => {
+    if (!open) return
+
+    const closeWhenClickingOutside = (event: PointerEvent) => {
+      if (event.target instanceof Element && !pickerRef.current?.contains(event.target)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+
+    window.addEventListener('pointerdown', closeWhenClickingOutside)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', closeWhenClickingOutside)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  return (
+    <div ref={pickerRef} className={`api-mode-picker ${open ? 'open' : ''}`}>
+      <button
+        className="api-mode-select"
+        type="button"
+        aria-label="API 模式"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{selectedOption.label}</span>
+        <ChevronDown size={16} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="api-mode-menu" role="listbox" aria-label="API 模式选项">
+          {apiModeOptions.map((option) => {
+            const selected = option.value === value
+            return (
+              <button
+                className={`api-mode-option ${selected ? 'selected' : ''}`}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                key={option.value}
+                onClick={() => {
+                  onChange(option.value)
+                  setOpen(false)
+                }}
+              >
+                <span>{option.label}</span>
+                {selected && <Check size={14} aria-hidden="true" />}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const updateNodeInternals = useUpdateNodeInternals()
   const replaceImageInputRef = useRef<HTMLInputElement>(null)
@@ -1795,6 +2134,32 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
   return (
     <div className={`workflow-node ${selected ? 'selected' : ''} ${data.kind}`}>
+      {selected && (isReference || isImage) && (
+        <div
+          className="image-context-actions nodrag nopan nowheel"
+          role="toolbar"
+          aria-label="图片操作"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            disabled={isGenerating}
+            onClick={() => data.onOpenLightDirection?.(nodeId)}
+          >
+            <Lightbulb size={14} />
+            调整灯光
+          </button>
+          <button
+            type="button"
+            disabled={!data.imageUrl || isGenerating}
+            title={data.imageUrl ? '创建并连接局部重绘框' : '请先上传或生成图片'}
+            onClick={() => data.onCreateRepaint?.(nodeId)}
+          >
+            <Brush size={14} />
+            局部重绘
+          </button>
+        </div>
+      )}
       {(isImage || isVideo || isRepaint || isOutpaint) && (
         <>
           {imageInputSlots.map((slot, index) => {
@@ -2355,6 +2720,7 @@ export default function App() {
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
   const [historyImagePreview, setHistoryImagePreview] = useState<HistoryImagePreview | null>(null)
   const [historyImageNaturalSize, setHistoryImageNaturalSize] = useState<{ width: number; height: number } | null>(null)
+  const [lightDirectionNodeId, setLightDirectionNodeId] = useState<string | null>(null)
   const [showQuickWorkflows, setShowQuickWorkflows] = useState(false)
   const [showPromptLibrary, setShowPromptLibrary] = useState(false)
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null)
@@ -2367,10 +2733,6 @@ export default function App() {
   const [change2ProModelStatus, setChange2ProModelStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [change2ProModelMessage, setChange2ProModelMessage] = useState('')
   const change2ProModelRequestIdRef = useRef(0)
-  const [agnesModels, setAgnesModels] = useState<Change2ProModelOption[]>(agnesFallbackModels)
-  const [agnesModelStatus, setAgnesModelStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
-  const [agnesModelMessage, setAgnesModelMessage] = useState('')
-  const agnesModelRequestIdRef = useRef(0)
   const [history, setHistory] = useState<GenerationRecord[]>([])
   const [isExporting, setIsExporting] = useState(false)
   const [isProjectSaving, setIsProjectSaving] = useState(false)
@@ -2380,8 +2742,8 @@ export default function App() {
   const markDirty = useCallback(() => setDirty(true), [])
 
   useEffect(() => {
-    window.localStorage.removeItem(`${API_PROFILE_STORAGE_KEY_PREFIX}volcengine`)
-    if (String(apiConfig.mode) !== 'volcengine') return
+    removedApiModes.forEach((mode) => window.localStorage.removeItem(`${API_PROFILE_STORAGE_KEY_PREFIX}${mode}`))
+    if (!removedApiModes.includes(String(apiConfig.mode) as (typeof removedApiModes)[number])) return
     window.localStorage.removeItem(API_STORAGE_KEY)
     setApiConfig(defaultApiConfig)
   }, [apiConfig.mode])
@@ -2430,43 +2792,6 @@ export default function App() {
     }
   }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.model])
 
-  const loadAgnesModels = useCallback(async () => {
-    const apiKey = apiConfig.apiKey.trim()
-    const endpoint = apiConfig.endpoint.trim()
-    if (!apiKey) {
-      setAgnesModels(agnesFallbackModels)
-      setAgnesModelStatus('idle')
-      setAgnesModelMessage('填写 Agnes AI API Key 后可读取当前账号实际可用的生图模型。')
-      return
-    }
-
-    const requestId = agnesModelRequestIdRef.current + 1
-    agnesModelRequestIdRef.current = requestId
-    setAgnesModelStatus('loading')
-    setAgnesModelMessage('正在读取 Agnes AI 生图模型…')
-
-    try {
-      const models = await requestAgnesModels(apiKey, endpoint)
-      if (agnesModelRequestIdRef.current !== requestId) return
-      setAgnesModels(models)
-      setAgnesModelStatus('success')
-      setAgnesModelMessage(`已读取 ${models.length} 个 Agnes AI 生图模型。`)
-      setApiConfig((current) => {
-        if (current.mode !== 'agnes' || current.apiKey.trim() !== apiKey || current.endpoint.trim() !== endpoint) return current
-        if (models.some((model) => model.id === current.model)) return current
-        const next = { ...current, model: models[0].id }
-        window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
-        window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
-        return next
-      })
-    } catch (error) {
-      if (agnesModelRequestIdRef.current !== requestId) return
-      setAgnesModels(agnesFallbackModels)
-      setAgnesModelStatus('error')
-      setAgnesModelMessage(error instanceof Error ? error.message : 'Agnes AI 模型列表读取失败。')
-    }
-  }, [apiConfig.apiKey, apiConfig.endpoint])
-
   useEffect(() => {
     setEdges((current) => normalizeImageInputEdges(current, nodes))
   }, [nodes, setEdges])
@@ -2485,21 +2810,6 @@ export default function App() {
     }, 500)
     return () => window.clearTimeout(timer)
   }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.mode, loadChange2ProModels, showSettings])
-
-  useEffect(() => {
-    if (!showSettings || apiConfig.mode !== 'agnes') return
-    if (apiConfig.apiKey.trim().length < 8) {
-      setAgnesModels(agnesFallbackModels)
-      setAgnesModelStatus('idle')
-      setAgnesModelMessage('填写 Agnes AI API Key 后将自动读取生图模型。')
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      void loadAgnesModels()
-    }, 500)
-    return () => window.clearTimeout(timer)
-  }, [apiConfig.apiKey, apiConfig.endpoint, apiConfig.mode, loadAgnesModels, showSettings])
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<WorkflowNode>[]) => {
@@ -2607,6 +2917,7 @@ export default function App() {
       setNodes((current) => current.filter((node) => !idsToDelete.has(node.id)))
       setEdges((current) => current.filter((edge) => !idsToDelete.has(edge.source) && !idsToDelete.has(edge.target)))
       setSelectedNodeId((current) => (current && idsToDelete.has(current) ? null : current))
+      setLightDirectionNodeId((current) => (current && idsToDelete.has(current) ? null : current))
       markDirty()
       setToast(idsToDelete.size > 1 ? `已删除 ${idsToDelete.size} 个画布节点。` : '已删除选中的画布节点。')
     },
@@ -2739,7 +3050,7 @@ export default function App() {
 
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || showModelStudio || groupDialog || historyImagePreview || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || showModelStudio || groupDialog || historyImagePreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -2748,7 +3059,7 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, groupDialog, historyImagePreview, nodes, selectedNodeId, showModelStudio, showSettings],
+    [deleteNodesByIds, groupDialog, historyImagePreview, lightDirectionNodeId, nodes, selectedNodeId, showModelStudio, showSettings],
   )
 
   useEffect(() => {
@@ -2766,6 +3077,17 @@ export default function App() {
     window.addEventListener('keydown', handlePreviewEscape, true)
     return () => window.removeEventListener('keydown', handlePreviewEscape, true)
   }, [historyImagePreview])
+
+  useEffect(() => {
+    if (!lightDirectionNodeId) return
+
+    const handleLightDirectionEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setLightDirectionNodeId(null)
+    }
+
+    window.addEventListener('keydown', handleLightDirectionEscape, true)
+    return () => window.removeEventListener('keydown', handleLightDirectionEscape, true)
+  }, [lightDirectionNodeId])
 
   const downloadNodeImage = useCallback(
     (nodeId: string) => {
@@ -2888,6 +3210,16 @@ export default function App() {
     [apiConfig.videoModel, nodes, updateNodeData],
   )
 
+  const changeNodeLightDirection = useCallback(
+    (nodeId: string, lightDirection: LightDirection) => {
+      updateNodeData(nodeId, {
+        lightDirection: normalizeLightDirection(lightDirection),
+        error: undefined,
+      })
+    },
+    [updateNodeData],
+  )
+
   const changeNodePrompt = useCallback(
     (nodeId: string, value: string) => {
       updateNodeData(nodeId, { prompt: value })
@@ -3007,6 +3339,7 @@ export default function App() {
           status: 'idle',
           model: apiConfig.model,
           imageSize: apiConfig.imageSize,
+          lightDirection: { ...defaultLightDirection },
           size: outputSize,
           createdAt,
           ...initialData,
@@ -3107,6 +3440,160 @@ export default function App() {
       setToast('已创建重绘节点，涂抹区域并输入提示词后点击重绘生成。')
     },
     [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes],
+  )
+
+  const openLightDirectionEditor = useCallback(
+    (nodeId: string) => {
+      const node = nodes.find((item) => item.id === nodeId)
+      if (!node || (node.data.kind !== 'reference' && node.data.kind !== 'image')) return
+      setLightDirectionNodeId(nodeId)
+    },
+    [nodes],
+  )
+
+  const createRepaintFromNode = useCallback(
+    (nodeId: string) => {
+      const sourceNode = nodes.find((item) => item.id === nodeId)
+      if (!sourceNode?.data.imageUrl) {
+        setToast('请先上传或生成图片，再进行局部重绘。')
+        return
+      }
+      const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
+      void createRepaintOutput(sourceNode, {
+        x: sourcePosition.x + 720,
+        y: sourcePosition.y + 230,
+      })
+    },
+    [createRepaintOutput, nodes],
+  )
+
+  const generateRelitImageFromNode = useCallback(
+    async (sourceNodeId: string) => {
+      const sourceNode = nodes.find((item) => item.id === sourceNodeId)
+      if (!sourceNode?.data.imageUrl) {
+        setToast('请先上传或生成图片，再调整灯光并生成。')
+        return
+      }
+
+      const lightDirection = normalizeLightDirection(sourceNode.data.lightDirection)
+      if (!lightDirection.enabled) {
+        setToast('请先开启灯光或拖动灯光图标设置方向。')
+        return
+      }
+
+      const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
+      const outputNodeId = id('image')
+      const createdAt = new Date().toLocaleString('zh-CN')
+      const outputSize = sourceNode.data.size || apiConfig.size || defaultApiConfig.size
+      const imageModel = apiConfig.mode === 'apimart'
+        ? findApiMartModel(sourceNode.data.kind === 'image' ? sourceNode.data.model || apiConfig.model : apiConfig.model)
+        : null
+      const selectedModel = imageModel?.id || apiConfig.model
+      const imageSize = imageModel
+        ? (sourceNode.data.imageSize && imageModel.resolutions.includes(sourceNode.data.imageSize)
+            ? sourceNode.data.imageSize
+            : imageModel.defaultResolution)
+        : apiConfig.imageSize
+      const configForNode = { ...apiConfig, model: selectedModel, imageSize, size: outputSize }
+      const adjustedPrompt = promptWithLightDirection(relightGenerationPrompt, lightDirection)
+      const outputPosition = findFreeWorkflowNodePosition(
+        { x: sourcePosition.x + 430, y: sourcePosition.y },
+        { width: 330, height: 480 },
+        nodes,
+      )
+      const outputNode: WorkflowNode = {
+        id: outputNodeId,
+        type: 'workflow',
+        position: outputPosition,
+        selected: true,
+        data: {
+          kind: 'image',
+          title: '灯光调整图像',
+          prompt: '',
+          generationPrompt: relightGenerationPrompt,
+          status: 'generating',
+          model: selectedModel,
+          imageSize,
+          lightDirection,
+          size: outputSize,
+          createdAt,
+        },
+      }
+
+      setNodes((current) => [
+        ...current.map((node) => ({ ...node, selected: false })),
+        outputNode,
+      ])
+      setEdges((current) => [
+        ...current,
+        {
+          id: id('edge'),
+          source: sourceNode.id,
+          sourceHandle: 'output',
+          target: outputNodeId,
+          targetHandle: `${imageInputHandlePrefix}1`,
+          animated: true,
+          markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+          style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
+        },
+      ])
+      setSelectedNodeId(outputNodeId)
+      setLightDirectionNodeId(null)
+      setIsGenerating(true)
+      markDirty()
+      setToast('已创建灯光调整图像框，正在按设置的方向生成。')
+      window.setTimeout(() => {
+        void flowInstance?.fitView({
+          nodes: [{ id: sourceNode.id }, { id: outputNodeId }],
+          padding: 0.22,
+          maxZoom: 0.95,
+          duration: 180,
+        })
+      }, 0)
+
+      try {
+        const imageUrl = await requestGeneratedImage(adjustedPrompt, configForNode, [sourceNode.data.imageUrl])
+        updateNodeData(outputNodeId, {
+          imageUrl,
+          status: 'done',
+          error: undefined,
+          model: selectedModel,
+          imageSize,
+          size: outputSize,
+        })
+        setHistory((current) => [
+          {
+            id: outputNodeId,
+            prompt: adjustedPrompt,
+            model: selectedModel,
+            size: outputSize,
+            createdAt,
+            imageUrl,
+            status: '成功',
+          },
+          ...current,
+        ])
+        setToast(`灯光方向图像已生成：${lightDirectionMetadata(lightDirection).label}。`)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '灯光方向图像生成失败'
+        updateNodeData(outputNodeId, { status: 'error', error: message })
+        setHistory((current) => [
+          {
+            id: outputNodeId,
+            prompt: adjustedPrompt,
+            model: selectedModel,
+            size: outputSize,
+            createdAt,
+            status: '失败',
+          },
+          ...current,
+        ])
+        setToast(message)
+      } finally {
+        setIsGenerating(false)
+      }
+    },
+    [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes, updateNodeData],
   )
 
   const createInputNodeFromTarget = useCallback(
@@ -3317,6 +3804,8 @@ export default function App() {
         onChangeSize: changeNodeSize,
         onChangeVideoResolution: changeNodeVideoResolution,
         onChangeVideoDuration: changeNodeVideoDuration,
+        onOpenLightDirection: openLightDirectionEditor,
+        onCreateRepaint: createRepaintFromNode,
         onChangePrompt: changeNodePrompt,
         onChangeMask: changeNodeMask,
         onChangeBrush: changeNodeBrush,
@@ -3392,6 +3881,7 @@ export default function App() {
         status: 'generating',
         model: apiConfig.model,
         imageSize: apiConfig.imageSize,
+        lightDirection: { ...defaultLightDirection },
         size: outputSize,
         createdAt,
       },
@@ -3495,7 +3985,11 @@ export default function App() {
         return left.edgeOrder - right.edgeOrder
       })
       .map(({ sourceNode }) => sourceNode.data.imageUrl as string)
-    const trimmed = promptSourceNode?.data.prompt?.trim() || node.data.prompt?.trim() || ''
+    const trimmed =
+      promptSourceNode?.data.prompt?.trim() ||
+      node.data.prompt?.trim() ||
+      node.data.generationPrompt?.trim() ||
+      ''
 
     if (!trimmed) {
       setToast('请先在连接的提示词输入框里输入提示词。')
@@ -3526,7 +4020,19 @@ export default function App() {
 
     try {
       const orderedPrompt = promptWithReferenceImageOrder(trimmed, referenceImageUrls.length)
-      const imageUrl = await requestGeneratedImage(orderedPrompt, configForNode, referenceImageUrls)
+      const connectedLightDirection = incomingInputs
+        .filter(
+          ({ edge, sourceNode }) =>
+            isImageInputHandle(edge.targetHandle) || (!edge.targetHandle && sourceNode.data.kind !== 'prompt'),
+        )
+        .map(({ sourceNode }) => sourceNode.data.lightDirection)
+        .find((direction) => normalizeLightDirection(direction).enabled)
+      const ownLightDirection = normalizeLightDirection(node.data.lightDirection)
+      const lightAdjustedPrompt = promptWithLightDirection(
+        orderedPrompt,
+        ownLightDirection.enabled ? ownLightDirection : connectedLightDirection,
+      )
+      const imageUrl = await requestGeneratedImage(lightAdjustedPrompt, configForNode, referenceImageUrls)
       updateNodeData(nodeId, {
         imageUrl,
         status: 'done',
@@ -3986,6 +4492,7 @@ export default function App() {
         status: 'idle',
         model: apiConfig.model,
         imageSize: apiConfig.imageSize,
+        lightDirection: { ...defaultLightDirection },
         size: apiConfig.size || defaultApiConfig.size,
         createdAt: new Date().toLocaleString('zh-CN'),
       },
@@ -4034,6 +4541,7 @@ export default function App() {
   function addQuickStartWorkflow(options: {
     outputKind: 'image' | 'video'
     initialPrompt?: string
+    lightDirectionEnabled?: boolean
     toastMessage: string
   }) {
     const canvasCenter = flowInstance?.screenToFlowPosition(
@@ -4053,6 +4561,9 @@ export default function App() {
         title: '参考图像',
         status: 'idle',
         model: '上传',
+        lightDirection: options.outputKind === 'image'
+          ? { ...defaultLightDirection, enabled: Boolean(options.lightDirectionEnabled) }
+          : undefined,
         size: apiConfig.size || defaultApiConfig.size,
         createdAt,
       },
@@ -4083,6 +4594,7 @@ export default function App() {
         status: 'idle',
         model: options.outputKind === 'video' ? apiConfig.videoModel : apiConfig.model,
         imageSize: options.outputKind === 'image' ? apiConfig.imageSize : undefined,
+        lightDirection: options.outputKind === 'image' ? { ...defaultLightDirection } : undefined,
         size: apiConfig.size || defaultApiConfig.size,
         ...(options.outputKind === 'video'
           ? {
@@ -4156,6 +4668,7 @@ export default function App() {
     addQuickStartWorkflow({
       outputKind: 'image',
       initialPrompt: productRetouchPrompt,
+      lightDirectionEnabled: true,
       toastMessage: '已创建产品图精修工作流，请上传待精修的产品图。',
     })
   }
@@ -4584,7 +5097,9 @@ export default function App() {
       let next: ApiConfig
 
       if (requestedMode && requestedMode !== current.mode) {
-        window.localStorage.setItem(apiProfileStorageKey(current.mode), JSON.stringify(current))
+        if (current.mode !== 'mock') {
+          window.localStorage.setItem(apiProfileStorageKey(current.mode), JSON.stringify(current))
+        }
         if (current.mode === 'change2pro') {
           writeStoredChange2ProFamilyProfile(
             current.change2ProFamily || change2ProFamilyFromModel(current.model),
@@ -4600,8 +5115,7 @@ export default function App() {
           mode: requestedMode,
         }
       } else {
-        const mode = patch.apiKey?.trim() && current.mode === 'mock' && !requestedMode ? 'openai' : current.mode
-        next = { ...current, ...patch, mode }
+        next = { ...current, ...patch }
       }
 
       if (next.mode === 'change2pro') {
@@ -4630,7 +5144,9 @@ export default function App() {
       }
 
       window.localStorage.setItem(API_STORAGE_KEY, JSON.stringify(next))
-      window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
+      if (next.mode !== 'mock') {
+        window.localStorage.setItem(apiProfileStorageKey(next.mode), JSON.stringify(next))
+      }
       if (next.mode === 'change2pro') {
         writeStoredChange2ProFamilyProfile(next.change2ProFamily || change2ProFamilyFromModel(next.model), next)
       }
@@ -4656,7 +5172,6 @@ export default function App() {
         apiKey: '',
         model: change2ProDefaultModel(family),
         imageSize: '1K',
-        responsePath: 'data.0.url',
         ...storedProfile,
         change2ProFamily: family,
       }
@@ -4684,6 +5199,9 @@ export default function App() {
   const canGroupSelection =
     selectedCanvasNodes.length >= 2 &&
     selectedCanvasNodes.every((node) => !node.parentId && node.data.kind !== 'group')
+  const lightDirectionNode = lightDirectionNodeId
+    ? nodes.find((node) => node.id === lightDirectionNodeId) ?? null
+    : null
 
   return (
     <main className="canvas-app">
@@ -5071,10 +5589,11 @@ export default function App() {
                             className="history-folder"
                             type="button"
                             onClick={() => void revealHistoryImage(item)}
-                            title="打开图片所在文件夹"
+                            title="下载图像"
+                            aria-label="下载生成历史图像"
                             disabled={!imageUrl}
                           >
-                            <FolderOpen size={15} />
+                            <Download size={15} />
                           </button>
                         </div>
                       )
@@ -5139,6 +5658,69 @@ export default function App() {
           )}
         </div>
       </section>
+
+      {lightDirectionNode && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setLightDirectionNodeId(null)
+          }}
+        >
+          <section
+            className="light-direction-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="调整灯光方向"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <h2>调整灯光</h2>
+                <p>拖动灯光图标设置产品高光方向，下一次生成时自动应用。</p>
+              </div>
+              <button type="button" onClick={() => setLightDirectionNodeId(null)} title="关闭" aria-label="关闭灯光调整">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="light-direction-modal-body">
+              <LightDirectionControl
+                value={lightDirectionNode.data.lightDirection}
+                disabled={lightDirectionNode.data.status === 'generating'}
+                onChange={(direction) => changeNodeLightDirection(lightDirectionNode.id, direction)}
+              />
+              <p>
+                {lightDirectionNode.data.kind === 'reference'
+                  ? '该方向将传递给已连接的图像生成框。'
+                  : '该方向将应用于此图像框下一次生成。'}
+              </p>
+            </div>
+            <div className="light-direction-modal-actions">
+              <button type="button" onClick={() => setLightDirectionNodeId(null)}>关闭</button>
+              <button
+                className="primary"
+                type="button"
+                disabled={
+                  !lightDirectionNode.data.imageUrl ||
+                  !normalizeLightDirection(lightDirectionNode.data.lightDirection).enabled ||
+                  lightDirectionNode.data.status === 'generating'
+                }
+                title={
+                  !lightDirectionNode.data.imageUrl
+                    ? '请先上传或生成图片'
+                    : !normalizeLightDirection(lightDirectionNode.data.lightDirection).enabled
+                      ? '请先开启灯光或拖动灯光图标'
+                      : '按当前灯光方向生成新图像'
+                }
+                onClick={() => void generateRelitImageFromNode(lightDirectionNode.id)}
+              >
+                <Wand2 size={14} />
+                生成
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {groupDialog && (
         <div className="modal-backdrop" role="presentation">
@@ -5212,7 +5794,7 @@ export default function App() {
             <div className="modal-head">
               <div>
                 <h2>API 设置</h2>
-                <p>支持 API Mart 图像与视频、Agnes AI、OpenAI 兼容图像接口，也可以接自己的 JSON API。</p>
+                <p>支持 GA、Change2Pro 与 API Mart 图像 / 视频接口。</p>
               </div>
               <button type="button" onClick={() => setShowSettings(false)} title="关闭">
                 <X size={18} />
@@ -5220,19 +5802,11 @@ export default function App() {
             </div>
 
             <div className="settings-grid">
-              <label className="field">
+              <div className="field">
                 <span>模式</span>
-                <select value={apiConfig.mode} onChange={(event) => updateApiConfig({ mode: event.target.value as ApiMode })}>
-                  <option value="grsai">GA 全部生图模型</option>
-                  <option value="change2pro">Change2Pro 生图模型</option>
-                  <option value="agnes">Agnes AI 生图模型</option>
-                  <option value="apimart">API Mart 图像 / 视频</option>
-                  <option value="mock">本地模拟</option>
-                  <option value="openai">OpenAI 兼容</option>
-                  <option value="custom">自定义 JSON API</option>
-                </select>
-              </label>
-              {apiConfig.mode !== 'apimart' && (
+                <ApiModeSelect value={apiConfig.mode} onChange={(mode) => updateApiConfig({ mode })} />
+              </div>
+              {(apiConfig.mode === 'grsai' || apiConfig.mode === 'change2pro') && (
                 <div className="field">
                   <span>模型</span>
                 {apiConfig.mode === 'grsai' ? (
@@ -5323,85 +5897,32 @@ export default function App() {
                       </div>
                     )}
                   </>
-                ) : apiConfig.mode === 'agnes' ? (
-                  <>
-                    <div className="change2pro-model-picker">
-                      <select
-                        aria-label="Agnes AI 生图模型"
-                        value={apiConfig.model}
-                        onChange={(event) => updateApiConfig({ model: event.target.value })}
-                        disabled={agnesModelStatus === 'loading'}
-                      >
-                        {agnesModels.map((model) => (
-                          <option key={model.id} value={model.id}>{apiModelDisplayName(model.id)}</option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => void loadAgnesModels()}
-                        disabled={!apiConfig.apiKey.trim() || agnesModelStatus === 'loading'}
-                      >
-                        {agnesModelStatus === 'loading' && <Loader2 size={13} />}
-                        {agnesModelStatus === 'loading' ? '读取中' : '读取模型'}
-                      </button>
-                    </div>
-                    <small className={`change2pro-model-message ${agnesModelStatus}`}>
-                      {agnesModelMessage || '官方生图模型：Agnes Image 2.1 Flash、Agnes Image 2.0 Flash。'}
-                    </small>
-                  </>
-                ) : (
-                  <input aria-label="模型" value={apiConfig.model} onChange={(event) => updateApiConfig({ model: event.target.value })} />
-                )}
+                ) : null}
                 </div>
               )}
-              {(apiConfig.mode === 'openai' || apiConfig.mode === 'custom') && (
+              {apiConfig.mode !== 'mock' && (
                 <label className="field wide">
-                  <span>Endpoint</span>
+                  <span>
+                    API Key
+                    {apiConfig.mode === 'change2pro' && ` · ${(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2' ? 'Image 2' : 'Nano Banana'}`}
+                  </span>
                   <input
-                    value={apiConfig.endpoint}
-                    onChange={(event) => updateApiConfig({ endpoint: event.target.value })}
-                    placeholder="https://api.example.com/v1/images/generations"
+                    type="password"
+                    value={apiConfig.apiKey}
+                    onChange={(event) => updateApiConfig({ apiKey: event.target.value })}
+                    placeholder="仅保存在当前浏览器 localStorage"
                   />
                 </label>
               )}
-              <label className="field wide">
-                <span>
-                  API Key
-                  {apiConfig.mode === 'change2pro' && ` · ${(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2' ? 'Image 2' : 'Nano Banana'}`}
-                </span>
-                <input
-                  type="password"
-                  value={apiConfig.apiKey}
-                  onChange={(event) => updateApiConfig({ apiKey: event.target.value })}
-                  placeholder="仅保存在当前浏览器 localStorage"
-                />
-              </label>
               <label className="field">
                 <span>尺寸</span>
                 <input value={apiConfig.size} onChange={(event) => updateApiConfig({ size: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>图片路径</span>
-                <input
-                  value={apiConfig.responsePath}
-                  onChange={(event) => updateApiConfig({ responsePath: event.target.value })}
-                  placeholder="data.0.url"
-                />
-              </label>
-              <label className="field wide">
-                <span>自定义请求体模板</span>
-                <textarea
-                  value={apiConfig.bodyTemplate}
-                  rows={7}
-                  onChange={(event) => updateApiConfig({ bodyTemplate: event.target.value })}
-                />
               </label>
             </div>
 
             <div className="modal-foot">
               <p>
-                模板支持 {'{prompt}'}、{'{model}'}、{'{size}'}、{'{referenceImageUrl}'}、{'{referenceImageBase64}'}、{'{maskImageUrl}'}、{'{maskImageBase64}'} 占位符。
-                请求会通过本地代理发送，避免浏览器 CORS 限制。
+                API Key 仅保存在当前浏览器，请求会通过本地代理发送以避免浏览器 CORS 限制。
               </p>
               <button type="button" onClick={() => setShowSettings(false)}>
                 完成
