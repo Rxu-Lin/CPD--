@@ -23,6 +23,14 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import UnifiedRange from './UnifiedRange'
+import type {
+  ParametricBoxSettings,
+  ParametricPrimitiveSettings,
+  SavedModel3DItem,
+  SavedModel3DScene,
+  SavedModel3DSource,
+  SavedTransform,
+} from './model3dSceneStore'
 import './Model3DStudio.css'
 
 type ViewportPreset = {
@@ -38,20 +46,6 @@ type ModelStats = {
   triangles: number
 }
 
-type ParametricBoxPose = 'closed' | 'open' | 'separated'
-
-type ParametricBoxSettings = {
-  length: number
-  width: number
-  baseHeight: number
-  lidHeight: number
-  thickness: number
-  gap: number
-  pose: ParametricBoxPose
-  baseColor: string
-  lidColor: string
-}
-
 type ParametricBoxData = {
   settings: ParametricBoxSettings
   baseMaterial: THREE.MeshStandardMaterial
@@ -61,17 +55,6 @@ type ParametricBoxData = {
 type ParametricBoxPartData = {
   part: 'base' | 'lid'
   settings: ParametricBoxSettings
-}
-
-type ParametricPrimitiveKind = 'cylinder' | 'cuboid'
-
-type ParametricPrimitiveSettings = {
-  kind: ParametricPrimitiveKind
-  radius: number
-  height: number
-  length: number
-  width: number
-  color: string
 }
 
 type ParametricPrimitiveData = {
@@ -88,41 +71,7 @@ type SceneItem = {
   parametricBox?: ParametricBoxData
   parametricBoxPart?: ParametricBoxPartData
   parametricPrimitive?: ParametricPrimitiveData
-}
-
-type SavedTransform = {
-  position: [number, number, number]
-  quaternion: [number, number, number, number]
-  scale: [number, number, number]
-}
-
-type SavedModel3DItem = {
-  kind: 'parametric-box' | 'parametric-part' | 'parametric-primitive'
-  name: string
-  transform: SavedTransform
-  settings?: ParametricBoxSettings
-  primitiveSettings?: ParametricPrimitiveSettings
-  part?: 'base' | 'lid'
-}
-
-type SavedModel3DScene = {
-  version: 1
-  savedAt: string
-  items: SavedModel3DItem[]
-  selectedIndex: number
-  viewportId: string
-  backgroundColor: string
-  focalLength: number
-  showProjection: boolean
-  lightEnabled: boolean
-  lightIntensity: number
-  lightAzimuth: number
-  lightElevation: number
-  camera: {
-    position: [number, number, number]
-    up: [number, number, number]
-    target: [number, number, number]
-  }
+  source?: SavedModel3DSource
 }
 
 type SceneItemSnapshot = {
@@ -142,7 +91,16 @@ type SceneHistorySnapshot = {
 
 type Model3DStudioProps = {
   onClose: () => void
-  onExport: (result: { dataUrl: string; fileName: string; width: number; height: number }) => void
+  initialScene?: SavedModel3DScene | null
+  sceneId?: string | null
+  onExport: (result: {
+    dataUrl: string
+    fileName: string
+    width: number
+    height: number
+    sceneId: string
+    scene: SavedModel3DScene
+  }) => void | Promise<void>
 }
 
 type PreviewRuntime = {
@@ -262,6 +220,26 @@ function modelFileExtension(fileName: string) {
   return fileName.split('.').pop()?.toLowerCase() || ''
 }
 
+function fileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error || new Error('模型文件读取失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function parseSavedModelSource(source: SavedModel3DSource) {
+  const response = await fetch(source.url)
+  if (!response.ok) throw new Error(`模型资源读取失败：${response.status}`)
+  if (source.format === 'OBJ') {
+    const { OBJLoader } = await import('three/addons/loaders/OBJLoader.js')
+    return new OBJLoader().parse(await response.text())
+  }
+  const { FBXLoader } = await import('three/addons/loaders/FBXLoader.js')
+  return new FBXLoader().parse(await response.arrayBuffer(), '')
+}
+
 function collectModelStats(object: THREE.Object3D): ModelStats {
   const stats = { meshes: 0, vertices: 0, triangles: 0 }
   object.traverse((child) => {
@@ -318,7 +296,7 @@ function readSavedModel3DScene(): SavedModel3DScene | null {
     const source = window.localStorage.getItem(model3DSceneStorageKey)
     if (!source) return null
     const parsed = JSON.parse(source) as SavedModel3DScene
-    return parsed?.version === 1 && Array.isArray(parsed.items) ? parsed : null
+    return (parsed?.version === 1 || parsed?.version === 2) && Array.isArray(parsed.items) ? parsed : null
   } catch {
     return null
   }
@@ -367,7 +345,7 @@ function sceneSnapshotSignature(snapshot: SceneHistorySnapshot) {
   })
 }
 
-export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps) {
+export default function Model3DStudio({ onClose, onExport, initialScene = null, sceneId = null }: Model3DStudioProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const viewportHostRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<PreviewRuntime | null>(null)
@@ -383,7 +361,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
   const selectSceneItemRef = useRef<(id: string | null) => void>(() => undefined)
   const deleteSelectedItemRef = useRef<() => void>(() => undefined)
   const undoSceneRef = useRef<() => void>(() => undefined)
-  const restoreSavedSceneRef = useRef<(saved: SavedModel3DScene) => void>(() => undefined)
+  const restoreSavedSceneRef = useRef<(saved: SavedModel3DScene) => Promise<void>>(async () => undefined)
   const updateSceneBoundsRef = useRef<(fitCamera?: boolean) => void>(() => undefined)
   const [sceneItems, setSceneItems] = useState<SceneItem[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
@@ -414,9 +392,9 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     triangles: total.triangles + item.stats.triangles,
   }), { meshes: 0, vertices: 0, triangles: 0 })
 
-  function saveSceneLocally() {
+  function captureSavedScene() {
     const runtime = runtimeRef.current
-    if (!runtime) return
+    if (!runtime) return null
     const items = sceneItemsRef.current.flatMap<SavedModel3DItem>((item) => {
       if (item.parametricBox) {
         return [{
@@ -443,11 +421,20 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
           primitiveSettings: { ...item.parametricPrimitive.settings },
         }]
       }
+      if (item.source) {
+        return [{
+          kind: 'imported-model',
+          name: item.name,
+          transform: savedTransformFromObject(item.object),
+          color: `#${item.material.color.getHexString()}`,
+          source: { ...item.source },
+        }]
+      }
       return []
     })
     const selectedIndex = sceneItemsRef.current.findIndex((item) => item.id === selectedItemIdRef.current)
     const saved: SavedModel3DScene = {
-      version: 1,
+      version: 2,
       savedAt: new Date().toISOString(),
       items,
       selectedIndex,
@@ -465,6 +452,12 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
         target: [runtime.controls.target.x, runtime.controls.target.y, runtime.controls.target.z],
       },
     }
+    return saved
+  }
+
+  function saveSceneLocally() {
+    const saved = captureSavedScene()
+    if (!saved) return
     try {
       window.localStorage.setItem(model3DSceneStorageKey, JSON.stringify(saved))
       setSaveStatus('saved')
@@ -816,8 +809,11 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     resizeObserver.observe(host)
     resize()
     controls.update()
-    const savedScene = readSavedModel3DScene()
-    if (savedScene) restoreSavedSceneRef.current(savedScene)
+    const savedScene = initialScene || readSavedModel3DScene()
+    if (savedScene) {
+      setLoading(true)
+      void restoreSavedSceneRef.current(savedScene).finally(() => setLoading(false))
+    }
 
     const renderFrame = () => {
       controls.update()
@@ -856,7 +852,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
       renderer.domElement.remove()
       runtimeRef.current = null
     }
-  }, [])
+  }, [initialScene])
 
   useEffect(() => {
     const runtime = runtimeRef.current
@@ -1175,7 +1171,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     return item
   }
 
-  function restoreSavedScene(saved: SavedModel3DScene) {
+  async function restoreSavedScene(saved: SavedModel3DScene) {
     setViewportId(viewportPresets.some((preset) => preset.id === saved.viewportId) ? saved.viewportId : 'square')
     setBackgroundColor(saved.backgroundColor || defaultBackgroundColor)
     setFocalLength(saved.focalLength || 50)
@@ -1185,7 +1181,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     setLightAzimuth(Number.isFinite(saved.lightAzimuth) ? saved.lightAzimuth : defaultLightAzimuth)
     setLightElevation(Number.isFinite(saved.lightElevation) ? saved.lightElevation : defaultLightElevation)
     const restored: SceneItem[] = []
-    saved.items.forEach((savedItem) => {
+    for (const savedItem of saved.items) {
       if (savedItem.kind === 'parametric-box' && savedItem.settings) {
         const item = createParametricBox(savedItem.settings, false)
         if (item) {
@@ -1205,8 +1201,26 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
           applySavedTransform(item.object, savedItem.transform)
           restored.push(item)
         }
+      } else if (savedItem.kind === 'imported-model' && savedItem.source) {
+        try {
+          const object = await parseSavedModelSource(savedItem.source)
+          const item = addSceneObject(
+            object,
+            savedItem.name,
+            savedItem.source.format,
+            savedItem.color || defaultModelColor,
+            false,
+            { ...savedItem.source },
+          )
+          item.name = savedItem.name
+          item.object.name = savedItem.name
+          applySavedTransform(item.object, savedItem.transform)
+          restored.push(item)
+        } catch (reason) {
+          setError(reason instanceof Error ? `部分模型恢复失败：${reason.message}` : '部分模型恢复失败')
+        }
       }
-    })
+    }
     syncSceneItems()
     selectSceneItem(restored[saved.selectedIndex]?.id || restored.at(-1)?.id || null)
     savedCameraRef.current = saved.camera
@@ -1322,6 +1336,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     format: string,
     color = defaultModelColor,
     recordHistory = true,
+    source?: SavedModel3DSource,
   ) {
     const runtime = runtimeRef.current
     if (!runtime) throw new Error('3D 预览器尚未准备好')
@@ -1359,7 +1374,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     object.name = name
     object.updateMatrixWorld(true)
 
-    const item: SceneItem = { id, name, format, object, material, stats: collectModelStats(object) }
+    const item: SceneItem = { id, name, format, object, material, stats: collectModelStats(object), source }
     allSceneItemsRef.current.add(item)
     runtime.scene.add(object)
     sceneItemsRef.current = [...sceneItemsRef.current, item]
@@ -1386,6 +1401,11 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     try {
       for (const file of supportedFiles) {
         const extension = modelFileExtension(file.name)
+        const source: SavedModel3DSource = {
+          fileName: file.name,
+          format: extension === 'obj' ? 'OBJ' : 'FBX',
+          url: await fileAsDataUrl(file),
+        }
         let object: THREE.Object3D
         if (extension === 'obj') {
           const [{ OBJLoader }, content] = await Promise.all([
@@ -1404,7 +1424,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
           disposeModel(object, null)
           return
         }
-        addSceneObject(object, file.name, extension.toUpperCase())
+        addSceneObject(object, file.name, extension.toUpperCase(), defaultModelColor, true, source)
       }
       window.requestAnimationFrame(() => updateSceneBounds(true))
     } catch (reason) {
@@ -1460,7 +1480,14 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
       mesh.geometry = mesh.geometry.clone()
       mesh.material = new THREE.MeshBasicMaterial()
     })
-    const copy = addSceneObject(clone, `${selectedItem.name} 副本`, selectedItem.format, `#${selectedItem.material.color.getHexString()}`, false)
+    const copy = addSceneObject(
+      clone,
+      `${selectedItem.name} 副本`,
+      selectedItem.format,
+      `#${selectedItem.material.color.getHexString()}`,
+      false,
+      selectedItem.source ? { ...selectedItem.source } : undefined,
+    )
     copy.object.position.copy(selectedItem.object.position).add(new THREE.Vector3(0.45, 0, 0.45))
     copy.object.rotation.copy(selectedItem.object.rotation)
     syncSceneItems()
@@ -1536,7 +1563,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
     runtime.camera.updateProjectionMatrix()
   }
 
-  function exportCurrentView() {
+  async function exportCurrentView() {
     const runtime = runtimeRef.current
     if (!runtime || !hasModel || exporting) {
       if (!hasModel) setError('请先加入至少一个 3D 模型')
@@ -1568,13 +1595,18 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
       runtime.transformControls.getHelper().visible = gizmoWasVisible
       runtime.controls.update()
 
-      setExporting(false)
-      onExport({
+      const savedScene = captureSavedScene()
+      if (!savedScene) throw new Error('无法保存当前 3D 场景')
+      await onExport({
         dataUrl,
         fileName: `礼盒3D构图-${viewport.width}x${viewport.height}.png`,
         width: viewport.width,
         height: viewport.height,
+        sceneId: sceneId || crypto.randomUUID(),
+        scene: savedScene,
       })
+      setExporting(false)
+      onClose()
     } catch (reason) {
       setExporting(false)
       setError(reason instanceof Error ? reason.message : '导出参考图失败')
@@ -2076,7 +2108,7 @@ export default function Model3DStudio({ onClose, onExport }: Model3DStudioProps)
             <button className="model3d-secondary-button" type="button" onClick={onClose}>取消</button>
             <button className="model3d-export-button" type="button" onClick={exportCurrentView} disabled={!hasModel || loading || exporting}>
               {exporting ? <Loader2 className="model3d-spinner" size={15} /> : <ImagePlus size={15} />}
-              {exporting ? '正在导出' : '导出到画板'}
+              {exporting ? '正在保存' : sceneId ? '更新参考图' : '导出到画板'}
             </button>
           </div>
         </footer>

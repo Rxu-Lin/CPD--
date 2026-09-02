@@ -26,6 +26,7 @@ const projectPackagesTempDir = path.resolve(process.cwd(), '.tmp-project-package
 const projectCacheDir = path.resolve(process.cwd(), '.project-cache')
 const runtimeImageSessionId = '00000000-0000-4000-8000-000000000000'
 const runtimeImagesDir = path.join(projectCacheDir, runtimeImageSessionId, 'images')
+const runtimeVideosDir = path.join(projectCacheDir, runtimeImageSessionId, 'videos')
 const generationRateLimits = new Map<string, { count: number; startedAt: number }>()
 
 let upstreamProxyDispatcher: Dispatcher | null | undefined
@@ -131,14 +132,18 @@ function readBody(req: IncomingMessage) {
   })
 }
 
-async function writeRequestBodyToFile(req: IncomingMessage, filePath: string) {
+async function writeRequestBodyToFile(
+  req: IncomingMessage,
+  filePath: string,
+  maxBytes = 250 * 1024 * 1024,
+  tooLargeMessage = '项目包不能超过 250 MB',
+) {
   let receivedBytes = 0
-  const maxBytes = 250 * 1024 * 1024
   const limiter = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       receivedBytes += chunk.length
       if (receivedBytes > maxBytes) {
-        callback(new Error('项目包不能超过 250 MB'))
+        callback(new Error(tooLargeMessage))
         return
       }
       callback(null, chunk)
@@ -224,6 +229,9 @@ function safeFileName(value: string) {
 }
 
 function extensionFromMediaType(mediaType: string) {
+  if (mediaType.includes('quicktime')) return '.mov'
+  if (mediaType.includes('mp4')) return '.mp4'
+  if (mediaType.includes('webm')) return '.webm'
   if (mediaType.includes('svg')) return '.svg'
   if (mediaType.includes('jpeg') || mediaType.includes('jpg')) return '.jpg'
   if (mediaType.includes('webp')) return '.webp'
@@ -233,7 +241,7 @@ function extensionFromMediaType(mediaType: string) {
 
 function parseDataUrl(dataUrl: string) {
   const match = dataUrl.match(/^data:([^,]*),(.*)$/s)
-  if (!match) throw new Error('图像数据格式不正确')
+  if (!match) throw new Error('媒体数据格式不正确')
 
   const mediaType = match[1].split(';')[0] || 'image/png'
   const payload = match[2]
@@ -247,10 +255,15 @@ function parseDataUrl(dataUrl: string) {
 
 function mediaTypeFromFilePath(filePath: string) {
   const extension = path.extname(filePath).toLowerCase()
+  if (extension === '.obj') return 'text/plain; charset=utf-8'
+  if (extension === '.fbx') return 'application/octet-stream'
   if (extension === '.svg') return 'image/svg+xml'
   if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
   if (extension === '.webp') return 'image/webp'
   if (extension === '.gif') return 'image/gif'
+  if (extension === '.mp4' || extension === '.m4v') return 'video/mp4'
+  if (extension === '.mov') return 'video/quicktime'
+  if (extension === '.webm') return 'video/webm'
   return 'image/png'
 }
 
@@ -304,6 +317,46 @@ async function loadImageBuffer(imageUrl: string) {
     extension: extensionFromMediaType(mediaType),
     mediaType,
   }
+}
+
+async function loadMediaBuffer(mediaUrl: string) {
+  if (mediaUrl.startsWith('data:')) return parseDataUrl(mediaUrl)
+
+  const localAssetPath = projectAssetPathFromUrl(mediaUrl)
+  if (localAssetPath) {
+    const mediaType = mediaTypeFromFilePath(localAssetPath)
+    return {
+      buffer: await readFile(localAssetPath),
+      extension: extensionFromMediaType(mediaType),
+      mediaType,
+    }
+  }
+
+  const response = await fetch(mediaUrl)
+  if (!response.ok) throw new Error(`下载媒体失败：${response.status} ${response.statusText}`)
+  const mediaType = response.headers.get('content-type') || 'application/octet-stream'
+  return {
+    buffer: Buffer.from(await response.arrayBuffer()),
+    extension: extensionFromMediaType(mediaType),
+    mediaType,
+  }
+}
+
+async function loadProjectModelBuffer(sourceUrl: string) {
+  if (sourceUrl.startsWith('data:')) {
+    const match = sourceUrl.match(/^data:([^,]*),(.*)$/s)
+    if (!match) throw new Error('3D 模型数据格式不正确')
+    return match[1].includes(';base64')
+      ? Buffer.from(match[2], 'base64')
+      : Buffer.from(decodeURIComponent(match[2]), 'utf8')
+  }
+
+  const localAssetPath = projectAssetPathFromUrl(sourceUrl)
+  if (localAssetPath) return readFile(localAssetPath)
+
+  const response = await fetch(sourceUrl)
+  if (!response.ok) throw new Error(`下载 3D 模型失败：${response.status} ${response.statusText}`)
+  return Buffer.from(await response.arrayBuffer())
 }
 
 function openFileInFolder(filePath: string) {
@@ -546,6 +599,7 @@ type ProjectJson = Record<string, unknown> & {
   nodes?: unknown[]
   edges?: unknown[]
   history?: unknown[]
+  model3DScenes?: unknown
 }
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
@@ -571,6 +625,35 @@ async function transformProjectImageValues(
   }
 }
 
+async function transformProjectVideoValues(
+  project: ProjectJson,
+  transform: (value: string) => Promise<string> | string,
+) {
+  for (const nodeValue of Array.isArray(project.nodes) ? project.nodes : []) {
+    if (!isJsonRecord(nodeValue) || !isJsonRecord(nodeValue.data)) continue
+    const value = nodeValue.data.videoUrl
+    if (typeof value === 'string' && value) nodeValue.data.videoUrl = await transform(value)
+  }
+}
+
+async function transformProjectModelValues(
+  project: ProjectJson,
+  transform: (value: string, fileName: string) => Promise<string> | string,
+) {
+  if (!isJsonRecord(project.model3DScenes)) return
+  for (const sceneValue of Object.values(project.model3DScenes)) {
+    if (!isJsonRecord(sceneValue) || !Array.isArray(sceneValue.items)) continue
+    for (const itemValue of sceneValue.items) {
+      if (!isJsonRecord(itemValue) || !isJsonRecord(itemValue.source)) continue
+      const value = itemValue.source.url
+      const fileName = itemValue.source.fileName
+      if (typeof value === 'string' && value && typeof fileName === 'string') {
+        itemValue.source.url = await transform(value, fileName)
+      }
+    }
+  }
+}
+
 async function materializeEmbeddedProjectImages(project: ProjectJson, cacheRoot: string) {
   const imageDirectory = path.join(cacheRoot, 'images')
   const extractedImages = new Map<string, string>()
@@ -591,6 +674,26 @@ async function materializeEmbeddedProjectImages(project: ProjectJson, cacheRoot:
   })
 }
 
+async function materializeEmbeddedProjectVideos(project: ProjectJson, cacheRoot: string) {
+  const videoDirectory = path.join(cacheRoot, 'videos')
+  const extractedVideos = new Map<string, string>()
+  let videoIndex = 0
+
+  await transformProjectVideoValues(project, async (value) => {
+    if (!value.startsWith('data:video/')) return value
+    const cached = extractedVideos.get(value)
+    if (cached) return cached
+
+    const video = parseDataUrl(value)
+    videoIndex += 1
+    const relativePath = `videos/legacy-${String(videoIndex).padStart(4, '0')}${video.extension}`
+    await mkdir(videoDirectory, { recursive: true })
+    await writeFile(path.join(cacheRoot, ...relativePath.split('/')), video.buffer)
+    extractedVideos.set(value, relativePath)
+    return relativePath
+  })
+}
+
 async function rewriteProjectImagesToAssetUrls(
   project: ProjectJson,
   sessionId: string,
@@ -598,6 +701,56 @@ async function rewriteProjectImagesToAssetUrls(
   cacheRoot: string,
 ) {
   await transformProjectImageValues(project, async (value) => {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('/')) return value
+    const normalizedPath = value.replaceAll('\\', '/')
+    const absolutePath = safeChildPath(projectBaseDir, normalizedPath)
+    let relativeToCache = path.relative(cacheRoot, absolutePath)
+
+    if (relativeToCache.startsWith('..') || path.isAbsolute(relativeToCache)) {
+      const cachePath = safeChildPath(cacheRoot, normalizedPath)
+      await mkdir(path.dirname(cachePath), { recursive: true })
+      await copyFile(absolutePath, cachePath)
+      relativeToCache = path.relative(cacheRoot, cachePath)
+    }
+
+    safeChildPath(cacheRoot, relativeToCache)
+    const encodedPath = relativeToCache.split(path.sep).map(encodeURIComponent).join('/')
+    return `/api/projects/assets/${sessionId}/${encodedPath}`
+  })
+}
+
+async function rewriteProjectVideosToAssetUrls(
+  project: ProjectJson,
+  sessionId: string,
+  projectBaseDir: string,
+  cacheRoot: string,
+) {
+  await transformProjectVideoValues(project, async (value) => {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('/')) return value
+    const normalizedPath = value.replaceAll('\\', '/')
+    const absolutePath = safeChildPath(projectBaseDir, normalizedPath)
+    let relativeToCache = path.relative(cacheRoot, absolutePath)
+
+    if (relativeToCache.startsWith('..') || path.isAbsolute(relativeToCache)) {
+      const cachePath = safeChildPath(cacheRoot, normalizedPath)
+      await mkdir(path.dirname(cachePath), { recursive: true })
+      await copyFile(absolutePath, cachePath)
+      relativeToCache = path.relative(cacheRoot, cachePath)
+    }
+
+    safeChildPath(cacheRoot, relativeToCache)
+    const encodedPath = relativeToCache.split(path.sep).map(encodeURIComponent).join('/')
+    return `/api/projects/assets/${sessionId}/${encodedPath}`
+  })
+}
+
+async function rewriteProjectModelsToAssetUrls(
+  project: ProjectJson,
+  sessionId: string,
+  projectBaseDir: string,
+  cacheRoot: string,
+) {
+  await transformProjectModelValues(project, async (value) => {
     if (/^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('/')) return value
     const normalizedPath = value.replaceAll('\\', '/')
     const absolutePath = safeChildPath(projectBaseDir, normalizedPath)
@@ -652,7 +805,10 @@ export async function openProjectFile(filePath: string) {
     if (!Array.isArray(project.nodes) || !Array.isArray(project.edges)) throw new Error('不是有效的 AI 画布项目')
 
     await materializeEmbeddedProjectImages(project, cacheRoot)
+    await materializeEmbeddedProjectVideos(project, cacheRoot)
     await rewriteProjectImagesToAssetUrls(project, sessionId, projectBaseDir, cacheRoot)
+    await rewriteProjectVideosToAssetUrls(project, sessionId, projectBaseDir, cacheRoot)
+    await rewriteProjectModelsToAssetUrls(project, sessionId, projectBaseDir, cacheRoot)
     return { sessionId, project }
   } catch (error) {
     await rm(cacheRoot, { recursive: true, force: true })
@@ -1366,6 +1522,7 @@ const apiMartVideoModelConfigs: Record<
     maxDuration: number
     defaultDuration: number
     maxReferenceImages: number
+    maxReferenceVideos: number
   }
 > = {
   'seedance-2.5': {
@@ -1376,6 +1533,7 @@ const apiMartVideoModelConfigs: Record<
     maxDuration: 30,
     defaultDuration: 5,
     maxReferenceImages: 30,
+    maxReferenceVideos: 10,
   },
   'seedance-2.0': {
     label: 'Seedance 2.0',
@@ -1385,6 +1543,7 @@ const apiMartVideoModelConfigs: Record<
     maxDuration: 15,
     defaultDuration: 5,
     maxReferenceImages: 9,
+    maxReferenceVideos: 3,
   },
   'MiniMax-H3': {
     label: 'MiniMax H3',
@@ -1394,6 +1553,7 @@ const apiMartVideoModelConfigs: Record<
     maxDuration: 15,
     defaultDuration: 5,
     maxReferenceImages: 9,
+    maxReferenceVideos: 0,
   },
 }
 
@@ -1412,6 +1572,10 @@ function apiMartVideoEndpoint(generationEndpoint: string) {
 
 function apiMartUploadImageEndpoint(generationEndpoint: string) {
   return apiMartSiblingEndpoint(generationEndpoint, 'uploads/images')
+}
+
+function apiMartUploadFileEndpoint(generationEndpoint: string) {
+  return apiMartSiblingEndpoint(generationEndpoint, 'files')
 }
 
 function apiMartTaskEndpoint(generationEndpoint: string, taskId: string) {
@@ -1616,7 +1780,74 @@ async function uploadApiMartReferenceImage(
   return uploadedUrl
 }
 
-async function requestApiMartVideo(config: ApiConfig, prompt: string, referenceImageUrls: string[]) {
+const supportedReferenceVideoMediaTypes = new Set(['video/mp4', 'video/quicktime'])
+
+function validateReferenceVideo(video: { buffer: Buffer; mediaType: string }, index: number) {
+  const mediaType = video.mediaType.split(';')[0].trim().toLowerCase()
+  if (!supportedReferenceVideoMediaTypes.has(mediaType)) {
+    throw new UpstreamHttpError(`参考视频 ${index + 1} 的格式为 ${mediaType || '未知'}，仅支持 MP4、MOV。`, 400)
+  }
+  if (!video.buffer.length) throw new UpstreamHttpError(`参考视频 ${index + 1} 内容为空，请重新上传。`, 400)
+  if (video.buffer.length > 100 * 1024 * 1024) {
+    throw new UpstreamHttpError(`参考视频 ${index + 1} 超过 100 MB，请压缩后重新上传。`, 400)
+  }
+}
+
+async function uploadApiMartReferenceVideo(
+  generationEndpoint: string,
+  apiKey: string,
+  videoUrl: string,
+  index: number,
+) {
+  const normalizedVideoUrl = videoUrl.trim()
+  const isApiMartAssetUrl = /^asset:\/\//i.test(normalizedVideoUrl)
+  const isPublicHttpUrl = /^https?:\/\//i.test(normalizedVideoUrl) && !shouldInlineGrsAiReference(normalizedVideoUrl)
+  if (isApiMartAssetUrl || isPublicHttpUrl) return normalizedVideoUrl
+
+  const video = await loadMediaBuffer(normalizedVideoUrl)
+  validateReferenceVideo(video, index)
+  const form = new FormData()
+  form.append(
+    'file',
+    new Blob([new Uint8Array(video.buffer)], { type: video.mediaType }),
+    `reference-video-${index + 1}${video.extension}`,
+  )
+  form.append('purpose', 'vision')
+
+  const uploadEndpoint = apiMartUploadFileEndpoint(generationEndpoint)
+  let response: Response
+  try {
+    response = await fetchUpstream(uploadEndpoint, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+    })
+  } catch (error) {
+    throw new Error(formatUpstreamFetchError(error, uploadEndpoint, '参考视频上传'))
+  }
+
+  const text = await response.text()
+  const json = parseJsonLikeResponse(text)
+  if (!response.ok) {
+    throw new UpstreamHttpError(httpFailureMessage(json, response.status, response.statusText, '参考视频上传'), response.status)
+  }
+  if (!json || typeof json !== 'object') throw new Error(`API Mart 未返回参考视频 ${index + 1} 的上传地址。`)
+  const record = json as Record<string, unknown>
+  const data = isJsonRecord(record.data) ? record.data : undefined
+  const uploadedUrl = stringValue(record, ['url', 'file_url', 'fileUrl', 'asset_url', 'assetUrl']) ||
+    (data ? stringValue(data, ['url', 'file_url', 'fileUrl', 'asset_url', 'assetUrl']) : undefined)
+  if (!uploadedUrl) {
+    throw new Error('API Mart 文件接口没有返回可用于 video_urls 的公开视频地址，请改用公网视频 URL。')
+  }
+  return uploadedUrl
+}
+
+async function requestApiMartVideo(
+  config: ApiConfig,
+  prompt: string,
+  referenceImageUrls: string[],
+  referenceVideoUrls: string[],
+) {
   if (!config.apiKey?.trim()) throw new UpstreamHttpError('请先填写 API Mart API Key。', 400)
   const modelId = config.videoModel || 'seedance-2.5'
   const modelConfig = apiMartVideoModelConfigs[modelId]
@@ -1637,11 +1868,22 @@ async function requestApiMartVideo(config: ApiConfig, prompt: string, referenceI
       400,
     )
   }
+  if (referenceVideoUrls.length > modelConfig.maxReferenceVideos) {
+    const supportMessage = modelConfig.maxReferenceVideos
+      ? `${modelConfig.label} 最多支持 ${modelConfig.maxReferenceVideos} 个参考视频，现已连接 ${referenceVideoUrls.length} 个。`
+      : `${modelConfig.label} 不支持参考视频，请切换为 Seedance 2.0 或 Seedance 2.5。`
+    throw new UpstreamHttpError(supportMessage, 400)
+  }
 
   const videoEndpoint = apiMartVideoEndpoint(config.endpoint.trim())
   const preparedImages = await Promise.all(
     referenceImageUrls.map((imageUrl, index) =>
       uploadApiMartReferenceImage(config.endpoint.trim(), config.apiKey.trim(), imageUrl, index),
+    ),
+  )
+  const preparedVideos = await Promise.all(
+    referenceVideoUrls.map((videoUrl, index) =>
+      uploadApiMartReferenceVideo(config.endpoint.trim(), config.apiKey.trim(), videoUrl, index),
     ),
   )
   const requestedResolution = config.videoResolution
@@ -1661,6 +1903,7 @@ async function requestApiMartVideo(config: ApiConfig, prompt: string, referenceI
   }
   if (modelId !== 'MiniMax-H3') payload.generate_audio = true
   if (preparedImages.length) payload.image_urls = preparedImages
+  if (preparedVideos.length) payload.video_urls = preparedVideos
 
   const headers = { Authorization: `Bearer ${config.apiKey.trim()}` }
   let created: unknown
@@ -1668,7 +1911,7 @@ async function requestApiMartVideo(config: ApiConfig, prompt: string, referenceI
     created = await postJson(videoEndpoint, headers, payload, '视频')
   } catch (error) {
     const message = error instanceof Error ? error.message : 'API Mart 视频请求失败'
-    const detail = `${message}（模型 ${modelConfig.label}，${resolution}，${duration} 秒，参考图 ${preparedImages.length} 张）`
+    const detail = `${message}（模型 ${modelConfig.label}，${resolution}，${duration} 秒，参考图 ${preparedImages.length} 张，参考视频 ${preparedVideos.length} 个）`
     if (error instanceof UpstreamHttpError) throw new UpstreamHttpError(detail, error.statusCode)
     throw new Error(detail)
   }
@@ -1768,6 +2011,7 @@ async function proxyVideoGeneration(body: {
   prompt?: string
   referenceImageUrl?: string
   referenceImageUrls?: string[]
+  referenceVideoUrls?: string[]
 }) {
   const config = body.config
   const prompt = body.prompt?.trim()
@@ -1775,7 +2019,10 @@ async function proxyVideoGeneration(body: {
   if (!prompt) throw new Error('缺少视频提示词')
   if (config.mode !== 'apimart') throw new UpstreamHttpError('视频生成目前需要使用 API Mart 模式。', 400)
   if (!config.endpoint?.trim()) throw new UpstreamHttpError('请先填写 API Mart Endpoint。', 400)
-  return requestApiMartVideo(config, prompt, referenceImageUrlsFromBody(body))
+  const referenceVideoUrls = Array.isArray(body.referenceVideoUrls)
+    ? body.referenceVideoUrls.filter((url): url is string => typeof url === 'string' && Boolean(url.trim()))
+    : []
+  return requestApiMartVideo(config, prompt, referenceImageUrlsFromBody(body), referenceVideoUrls)
 }
 
 function localImageLibraryPlugin(): Plugin {
@@ -1816,6 +2063,7 @@ function localImageLibraryPlugin(): Plugin {
             prompt?: string
             referenceImageUrl?: string
             referenceImageUrls?: string[]
+            referenceVideoUrls?: string[]
           }
           const result = await proxyVideoGeneration(body)
           sendJson(res, 200, result)
@@ -1932,6 +2180,39 @@ function localImageLibraryPlugin(): Plugin {
         }
       })
 
+      server.middlewares.use('/api/videos/cache', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') {
+          next()
+          return
+        }
+
+        let filePath = ''
+        try {
+          const mediaType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
+          const encodedName = Array.isArray(req.headers['x-file-name']) ? req.headers['x-file-name'][0] : req.headers['x-file-name']
+          const sourceName = encodedName ? decodeURIComponent(encodedName) : 'reference-video.mp4'
+          const sourceExtension = path.extname(sourceName).toLowerCase()
+          const extension = mediaType === 'video/quicktime' || sourceExtension === '.mov' ? '.mov' : '.mp4'
+          if (!['video/mp4', 'video/quicktime', 'application/octet-stream'].includes(mediaType)) {
+            throw new UpstreamHttpError('参考视频仅支持 MP4 或 MOV 格式。', 400)
+          }
+
+          const fileName = `reference-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`
+          await mkdir(runtimeVideosDir, { recursive: true })
+          filePath = path.join(runtimeVideosDir, fileName)
+          await writeRequestBodyToFile(req, filePath, 100 * 1024 * 1024, '单个参考视频不能超过 100 MB')
+          const stats = await readFile(filePath)
+          if (!stats.length) throw new Error('参考视频内容为空')
+          sendJson(res, 200, {
+            videoUrl: `/api/projects/assets/${runtimeImageSessionId}/videos/${encodeURIComponent(fileName)}`,
+          })
+        } catch (error) {
+          if (filePath) await unlink(filePath).catch(() => undefined)
+          const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
+          sendJson(res, statusCode, { error: error instanceof Error ? error.message : '参考视频缓存失败' })
+        }
+      })
+
       server.middlewares.use('/api/projects/assets', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
         if (req.method !== 'GET') {
           next()
@@ -1966,6 +2247,8 @@ function localImageLibraryPlugin(): Plugin {
           const sessionId = randomUUID()
           const sessionRoot = path.join(projectPackagesTempDir, sessionId)
           await mkdir(path.join(sessionRoot, 'images'), { recursive: true })
+          await mkdir(path.join(sessionRoot, 'videos'), { recursive: true })
+          await mkdir(path.join(sessionRoot, 'models'), { recursive: true })
           await writeFile(path.join(sessionRoot, '.active'), sessionId, 'utf8')
           sendJson(res, 200, { sessionId })
         } catch (error) {
@@ -1997,6 +2280,70 @@ function localImageLibraryPlugin(): Plugin {
         }
       })
 
+      server.middlewares.use('/api/projects/package/add-video', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') {
+          next()
+          return
+        }
+
+        try {
+          const body = JSON.parse(await readBody(req)) as {
+            sessionId?: string
+            videoUrl?: string
+            fileName?: string
+            index?: number
+          }
+          const sessionId = validateSessionId(body.sessionId || '')
+          if (!body.videoUrl) throw new Error('缺少项目视频')
+          const sessionRoot = path.join(projectPackagesTempDir, sessionId)
+          await readFile(path.join(sessionRoot, '.active'), 'utf8')
+
+          const video = await loadMediaBuffer(body.videoUrl)
+          if (video.buffer.byteLength > 200 * 1024 * 1024) throw new Error('单个项目视频不能超过 200 MB')
+          const sourceExtension = path.extname(body.fileName || '').toLowerCase()
+          const extension = sourceExtension === '.mov' || video.mediaType.includes('quicktime') ? '.mov' : '.mp4'
+          const index = Number.isSafeInteger(body.index) && Number(body.index) > 0 ? Number(body.index) : Date.now()
+          const fileName = `asset-${String(index).padStart(4, '0')}${extension}`
+          const relativePath = `videos/${fileName}`
+          await writeFile(path.join(sessionRoot, 'videos', fileName), video.buffer)
+          sendJson(res, 200, { relativePath })
+        } catch (error) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : '项目视频写入失败' })
+        }
+      })
+
+      server.middlewares.use('/api/projects/package/add-model', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') {
+          next()
+          return
+        }
+
+        try {
+          const body = JSON.parse(await readBody(req)) as {
+            sessionId?: string
+            sourceUrl?: string
+            fileName?: string
+            index?: number
+          }
+          const sessionId = validateSessionId(body.sessionId || '')
+          if (!body.sourceUrl || !body.fileName) throw new Error('缺少 3D 模型资源')
+          const extension = path.extname(body.fileName).toLowerCase()
+          if (!['.obj', '.fbx'].includes(extension)) throw new Error('项目包仅支持 OBJ 或 FBX 模型资源')
+          const sessionRoot = path.join(projectPackagesTempDir, sessionId)
+          await readFile(path.join(sessionRoot, '.active'), 'utf8')
+
+          const buffer = await loadProjectModelBuffer(body.sourceUrl)
+          if (buffer.byteLength > 100 * 1024 * 1024) throw new Error('单个 3D 模型不能超过 100 MB')
+          const index = Number.isSafeInteger(body.index) && Number(body.index) > 0 ? Number(body.index) : Date.now()
+          const fileName = `asset-${String(index).padStart(4, '0')}${extension}`
+          const relativePath = `models/${fileName}`
+          await writeFile(path.join(sessionRoot, 'models', fileName), buffer)
+          sendJson(res, 200, { relativePath })
+        } catch (error) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : '3D 模型写入失败' })
+        }
+      })
+
       server.middlewares.use('/api/projects/package/finish', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
         if (req.method !== 'POST') {
           next()
@@ -2013,7 +2360,7 @@ function localImageLibraryPlugin(): Plugin {
 
           const content = await readBody(req)
           if (!content.trim()) throw new Error('项目内容为空')
-          if (content.includes('data:image/')) throw new Error('项目清单不能包含 Base64 图片')
+          if (/data:[^,]+;base64,/i.test(content)) throw new Error('项目清单不能包含 Base64 资源')
           const project = JSON.parse(content) as ProjectJson
           if (!Array.isArray(project.nodes) || !Array.isArray(project.edges)) throw new Error('项目清单无效')
 

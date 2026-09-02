@@ -29,6 +29,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import {
   AlertTriangle,
+  AtSign,
   BookOpen,
   Box,
   Brush,
@@ -74,10 +75,18 @@ import {
   normalizeGrsAiEndpoint,
   normalizeGrsAiModel,
 } from './grsaiModels'
+import {
+  deleteModel3DScene,
+  readModel3DScene,
+  readModel3DScenes,
+  saveModel3DScene,
+  saveModel3DScenes,
+  type SavedModel3DScene,
+} from './model3dSceneStore'
 
 const Model3DStudio = lazy(() => import('./Model3DStudio'))
 
-type NodeKind = 'prompt' | 'image' | 'video' | 'reference' | 'repaint' | 'outpaint' | 'group'
+type NodeKind = 'prompt' | 'image' | 'video' | 'reference' | 'video-reference' | 'repaint' | 'outpaint' | 'group'
 type NodeStatus = 'idle' | 'generating' | 'done' | 'error'
 type RepaintBrushColor = 'red' | 'blue'
 type OutpaintInsets = { top: number; right: number; bottom: number; left: number }
@@ -185,6 +194,7 @@ type ApiMartModelOption = {
   label: string
   resolutions: ImageResolutionTier[]
   defaultResolution: ImageResolutionTier
+  maxReferenceImages: number
 }
 
 type ApiMartVideoModelOption = {
@@ -195,6 +205,7 @@ type ApiMartVideoModelOption = {
   minDuration: number
   maxDuration: number
   defaultDuration: number
+  maxReferenceVideos: number
 }
 
 type GenerationRecord = {
@@ -217,6 +228,20 @@ type ImageInputSlot = {
   connected: boolean
 }
 
+type PromptMentionKind = 'image' | 'video'
+
+type PromptMentionBinding = {
+  token: string
+  nodeId: string
+  kind: PromptMentionKind
+  label: string
+}
+
+type PromptMentionOption = PromptMentionBinding & {
+  slotIndex: number
+  previewUrl?: string
+}
+
 type LightDirection = {
   x: number
   y: number
@@ -228,9 +253,12 @@ type WorkflowNodeData = {
   apiMode?: ApiMode
   title: string
   prompt?: string
+  promptMentions?: PromptMentionBinding[]
+  promptMentionOptions?: PromptMentionOption[]
   generationPrompt?: string
   imageUrl?: string
   videoUrl?: string
+  videoDurationSeconds?: number
   sourceImageUrl?: string
   maskUrl?: string
   brushSize?: number
@@ -246,18 +274,22 @@ type WorkflowNodeData = {
   videoResolution?: VideoResolutionTier
   videoDuration?: number
   lightDirection?: LightDirection
+  model3DSceneId?: string
   sourceName?: string
   error?: string
   createdAt: string
   promptInputConnected?: boolean
   imageInputConnected?: boolean
   imageInputSlots?: ImageInputSlot[]
+  videoInputConnected?: boolean
+  videoInputSlots?: ImageInputSlot[]
   outputConnected?: boolean
   memberCount?: number
   onDelete?: (id: string) => void
   onDownload?: (id: string) => void
   onRevealImage?: (id: string) => void
   onReplaceImage?: (id: string, file: File) => void
+  onReplaceVideo?: (id: string, file: File) => void
   onGenerate?: (id: string) => void
   onChangeImageModel?: (id: string, model: string) => void
   onChangeImageSize?: (id: string, imageSize: ImageResolutionTier) => void
@@ -267,8 +299,10 @@ type WorkflowNodeData = {
   onChangeVideoDuration?: (id: string, duration: number) => void
   onChangeLightDirection?: (id: string, direction: LightDirection) => void
   onOpenLightDirection?: (id: string) => void
+  onEditModel3D?: (id: string) => void
   onCreateRepaint?: (id: string) => void
-  onChangePrompt?: (id: string, prompt: string) => void
+  onChangePrompt?: (id: string, prompt: string, mentions?: PromptMentionBinding[]) => void
+  onLocatePromptMention?: (nodeId: string) => void
   onChangeMask?: (id: string, maskUrl: string) => void
   onChangeBrush?: (id: string, brushSize: number) => void
   onChangeBrushColor?: (id: string, brushColor: RepaintBrushColor) => void
@@ -287,6 +321,7 @@ type WorkflowEdgeData = Record<string, unknown> & {
 type WorkflowEdge = Edge<WorkflowEdgeData, 'disconnectible'>
 
 const imageInputHandlePrefix = 'image-'
+const videoInputHandlePrefix = 'video-'
 
 function imageInputHandleIndex(handleId?: string | null) {
   if (handleId === 'image') return 1
@@ -297,6 +332,16 @@ function imageInputHandleIndex(handleId?: string | null) {
 
 function isImageInputHandle(handleId?: string | null) {
   return imageInputHandleIndex(handleId) !== null
+}
+
+function videoInputHandleIndex(handleId?: string | null) {
+  if (!handleId?.startsWith(videoInputHandlePrefix)) return null
+  const index = Number(handleId.slice(videoInputHandlePrefix.length))
+  return Number.isInteger(index) && index > 0 ? index : null
+}
+
+function isVideoInputHandle(handleId?: string | null) {
+  return videoInputHandleIndex(handleId) !== null
 }
 
 function normalizeImageInputEdges(edgeValues: Edge[], nodeValues: WorkflowNode[]) {
@@ -332,13 +377,183 @@ function normalizeImageInputEdges(edgeValues: Edge[], nodeValues: WorkflowNode[]
     })
   }
 
+  const videoTargetIds = nodeValues.filter((node) => node.data.kind === 'video').map((node) => node.id)
+
+  for (const targetId of videoTargetIds) {
+    const videoEdges = normalizedEdges
+      .map((edge, position) => ({ edge, position, handleIndex: videoInputHandleIndex(edge.targetHandle) }))
+      .filter(
+        ({ edge, handleIndex }) =>
+          edge.target === targetId &&
+          (handleIndex !== null || (!edge.targetHandle && sourceKindById.get(edge.source) === 'video-reference')),
+      )
+      .sort((left, right) => {
+        if (left.handleIndex !== null && right.handleIndex !== null && left.handleIndex !== right.handleIndex) {
+          return left.handleIndex - right.handleIndex
+        }
+        if (left.handleIndex !== null && right.handleIndex === null) return -1
+        if (left.handleIndex === null && right.handleIndex !== null) return 1
+        return left.position - right.position
+      })
+
+    videoEdges.forEach(({ edge, position }, index) => {
+      const targetHandle = `${videoInputHandlePrefix}${index + 1}`
+      if (edge.targetHandle === targetHandle) return
+      normalizedEdges[position] = { ...edge, targetHandle }
+      changed = true
+    })
+  }
+
   return changed ? normalizedEdges : edgeValues
+}
+
+function promptMentionOptionsForNode(promptNodeId: string, nodeValues: WorkflowNode[], edgeValues: Edge[]) {
+  const nodeById = new Map(nodeValues.map((node) => [node.id, node]))
+  const targetGenerationNodes = edgeValues
+    .filter((edge) => {
+      const target = nodeById.get(edge.target)
+      return (
+        edge.source === promptNodeId &&
+        (target?.data.kind === 'image' || target?.data.kind === 'video') &&
+        (edge.targetHandle === 'prompt' || !edge.targetHandle)
+      )
+    })
+    .map((edge) => nodeById.get(edge.target))
+    .filter((node): node is WorkflowNode => Boolean(node))
+  const options: PromptMentionOption[] = []
+  const seenNodeIds = new Set<string>()
+
+  for (const targetNode of targetGenerationNodes) {
+    const incoming = edgeValues
+      .map((edge, edgeOrder) => ({ edge, edgeOrder, sourceNode: nodeById.get(edge.source) }))
+      .filter((item): item is { edge: Edge; edgeOrder: number; sourceNode: WorkflowNode } => (
+        item.edge.target === targetNode.id && Boolean(item.sourceNode)
+      ))
+    const imageSources = incoming
+      .filter(({ edge, sourceNode }) => (
+        Boolean(sourceNode.data.imageUrl) &&
+        (isImageInputHandle(edge.targetHandle) || (!edge.targetHandle && sourceNode.data.kind !== 'prompt'))
+      ))
+      .sort((left, right) => {
+        const leftIndex = imageInputHandleIndex(left.edge.targetHandle)
+        const rightIndex = imageInputHandleIndex(right.edge.targetHandle)
+        if (leftIndex !== null && rightIndex !== null && leftIndex !== rightIndex) return leftIndex - rightIndex
+        if (leftIndex !== null && rightIndex === null) return -1
+        if (leftIndex === null && rightIndex !== null) return 1
+        return left.edgeOrder - right.edgeOrder
+      })
+    const videoSources = incoming
+      .filter(({ edge, sourceNode }) => (
+        targetNode.data.kind === 'video' &&
+        Boolean(sourceNode.data.videoUrl) &&
+        (isVideoInputHandle(edge.targetHandle) || sourceNode.data.kind === 'video-reference')
+      ))
+      .sort((left, right) => {
+        const leftIndex = videoInputHandleIndex(left.edge.targetHandle)
+        const rightIndex = videoInputHandleIndex(right.edge.targetHandle)
+        if (leftIndex !== null && rightIndex !== null && leftIndex !== rightIndex) return leftIndex - rightIndex
+        if (leftIndex !== null && rightIndex === null) return -1
+        if (leftIndex === null && rightIndex !== null) return 1
+        return left.edgeOrder - right.edgeOrder
+      })
+
+    imageSources.forEach(({ sourceNode }, index) => {
+      if (seenNodeIds.has(sourceNode.id)) return
+      seenNodeIds.add(sourceNode.id)
+      options.push({
+        token: `@Image${index + 1}`,
+        nodeId: sourceNode.id,
+        kind: 'image',
+        label: sourceNode.data.sourceName || sourceNode.data.title,
+        slotIndex: index + 1,
+        previewUrl: sourceNode.data.imageUrl,
+      })
+    })
+    videoSources.forEach(({ sourceNode }, index) => {
+      if (seenNodeIds.has(sourceNode.id)) return
+      seenNodeIds.add(sourceNode.id)
+      options.push({
+        token: `@Video${index + 1}`,
+        nodeId: sourceNode.id,
+        kind: 'video',
+        label: sourceNode.data.sourceName || sourceNode.data.title,
+        slotIndex: index + 1,
+        previewUrl: sourceNode.data.videoUrl,
+      })
+    })
+  }
+
+  return options
 }
 
 function promptWithReferenceImageOrder(prompt: string, referenceImageCount: number) {
   if (referenceImageCount <= 1) return prompt
   const labels = Array.from({ length: referenceImageCount }, (_, index) => `Image ${index + 1}`).join('、')
   return `${prompt}\n\n参考图顺序说明：参考图已按画布端口编号依次传入（${labels}）。请严格按该编号理解图片；提示词提到 Image N 时，对应同名编号的参考图。`
+}
+
+function promptWithReferenceVideoOrder(prompt: string, referenceVideoCount: number) {
+  if (!referenceVideoCount) return prompt
+  const labels = Array.from({ length: referenceVideoCount }, (_, index) => `Video ${index + 1}`).join('、')
+  return `${prompt}\n\n参考视频顺序说明：参考视频已按画布端口编号依次传入（${labels}）。提示词提到 Video N 时，对应同名编号的参考视频。`
+}
+
+function promptContainsMentionToken(prompt: string, token: string) {
+  let searchFrom = 0
+  while (searchFrom < prompt.length) {
+    const index = prompt.indexOf(token, searchFrom)
+    if (index < 0) return false
+    const nextCharacter = prompt[index + token.length]
+    if (!nextCharacter || !/[A-Za-z0-9_]/.test(nextCharacter)) return true
+    searchFrom = index + token.length
+  }
+  return false
+}
+
+function activePromptMentions(prompt: string, mentions: PromptMentionBinding[] = []) {
+  return mentions.filter((mention) => promptContainsMentionToken(prompt, mention.token))
+}
+
+function compilePromptMentions(
+  prompt: string,
+  mentions: PromptMentionBinding[] = [],
+  referenceImageNodeIds: string[],
+  referenceVideoNodeIds: string[],
+) {
+  const imageIndexByNodeId = new Map(referenceImageNodeIds.map((nodeId, index) => [nodeId, index + 1]))
+  const videoIndexByNodeId = new Map(referenceVideoNodeIds.map((nodeId, index) => [nodeId, index + 1]))
+  const activeMentions = activePromptMentions(prompt, mentions)
+  const missingMentions = activeMentions.filter((mention) => (
+    mention.kind === 'image'
+      ? !imageIndexByNodeId.has(mention.nodeId)
+      : !videoIndexByNodeId.has(mention.nodeId)
+  ))
+
+  if (missingMentions.length) {
+    throw new Error(`提示词中的 ${missingMentions.map((mention) => mention.token).join('、')} 对应素材未连接到当前生成框。`)
+  }
+
+  let compiled = prompt
+  for (const mention of [...activeMentions].sort((left, right) => right.token.length - left.token.length)) {
+    const index = mention.kind === 'image'
+      ? imageIndexByNodeId.get(mention.nodeId)
+      : videoIndexByNodeId.get(mention.nodeId)
+    if (!index) continue
+    compiled = compiled.split(mention.token).join(`${mention.kind === 'image' ? 'Image' : 'Video'} ${index}`)
+  }
+
+  compiled = compiled.replace(/@Image(\d+)\b/g, (token, rawIndex: string) => {
+    const index = Number(rawIndex)
+    if (!referenceImageNodeIds[index - 1]) throw new Error(`提示词中的 ${token} 没有对应的已连接参考图。`)
+    return `Image ${index}`
+  })
+  compiled = compiled.replace(/@Video(\d+)\b/g, (token, rawIndex: string) => {
+    const index = Number(rawIndex)
+    if (!referenceVideoNodeIds[index - 1]) throw new Error(`提示词中的 ${token} 没有对应的已连接参考视频。`)
+    return `Video ${index}`
+  })
+
+  return compiled
 }
 
 const defaultLightDirection: LightDirection = {
@@ -397,11 +612,12 @@ function promptWithLightDirection(prompt: string, value?: Partial<LightDirection
 }
 
 type ProjectFile = {
-  version: 1 | 2
+  version: 1 | 2 | 3
   projectName: string
   nodes: WorkflowNode[]
   edges: Edge[]
   history: GenerationRecord[]
+  model3DScenes?: Record<string, SavedModel3DScene>
 }
 
 type ProjectArchiveWritable = {
@@ -488,30 +704,35 @@ const apiMartModels: ApiMartModelOption[] = [
     label: 'Nano Banana Pro',
     resolutions: ['1K', '2K', '4K'],
     defaultResolution: '1K',
+    maxReferenceImages: 14,
   },
   {
     id: 'gemini-3.1-flash-image-preview',
     label: 'Nano Banana 2',
     resolutions: ['1K', '2K', '4K'],
     defaultResolution: '1K',
+    maxReferenceImages: 14,
   },
   {
     id: 'gpt-image-2',
     label: 'GPT Image 2',
     resolutions: ['1K', '2K', '4K'],
     defaultResolution: '1K',
+    maxReferenceImages: 16,
   },
   {
     id: 'seedream-5-0-pro',
     label: 'Seedream 5.0 Pro',
     resolutions: ['1K', '1.5K', '2K'],
     defaultResolution: '1K',
+    maxReferenceImages: 10,
   },
   {
     id: 'seedream-5-0-lite',
     label: 'Seedream 5.0 Lite',
     resolutions: ['2K', '3K', '4K'],
     defaultResolution: '2K',
+    maxReferenceImages: 14,
   },
 ]
 
@@ -524,6 +745,7 @@ const apiMartVideoModels: ApiMartVideoModelOption[] = [
     minDuration: 4,
     maxDuration: 30,
     defaultDuration: 5,
+    maxReferenceVideos: 10,
   },
   {
     id: 'seedance-2.0',
@@ -533,6 +755,7 @@ const apiMartVideoModels: ApiMartVideoModelOption[] = [
     minDuration: 4,
     maxDuration: 15,
     defaultDuration: 5,
+    maxReferenceVideos: 3,
   },
   {
     id: 'MiniMax-H3',
@@ -542,6 +765,7 @@ const apiMartVideoModels: ApiMartVideoModelOption[] = [
     minDuration: 4,
     maxDuration: 15,
     defaultDuration: 5,
+    maxReferenceVideos: 0,
   },
 ]
 
@@ -932,6 +1156,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onDownload,
     onRevealImage,
     onReplaceImage,
+    onReplaceVideo,
     onGenerate,
     onChangeSize,
     onChangeImageModel,
@@ -941,8 +1166,10 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onChangeVideoDuration,
     onChangeLightDirection,
     onOpenLightDirection,
+    onEditModel3D,
     onCreateRepaint,
     onChangePrompt,
+    onLocatePromptMention,
     onChangeMask,
     onChangeBrush,
     onChangeBrushColor,
@@ -954,12 +1181,14 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onRenameGroup,
     apiMode,
     memberCount,
+    promptMentionOptions,
     ...data
   } = node.data
   void onDelete
   void onDownload
   void onRevealImage
   void onReplaceImage
+  void onReplaceVideo
   void onGenerate
   void onChangeSize
   void onChangeImageModel
@@ -969,8 +1198,10 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onChangeVideoDuration
   void onChangeLightDirection
   void onOpenLightDirection
+  void onEditModel3D
   void onCreateRepaint
   void onChangePrompt
+  void onLocatePromptMention
   void onChangeMask
   void onChangeBrush
   void onChangeBrushColor
@@ -982,6 +1213,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onRenameGroup
   void apiMode
   void memberCount
+  void promptMentionOptions
   const transientNode = node as WorkflowNode & { resizing?: boolean }
   const { measured, selected, dragging, resizing, ...stableNode } = transientNode
   void measured
@@ -1003,11 +1235,14 @@ function normalizeImportedProject(project: Partial<ProjectFile>): ProjectFile {
   }
 
   return {
-    version: project.version === 2 ? 2 : 1,
+    version: project.version === 3 ? 3 : project.version === 2 ? 2 : 1,
     projectName: project.projectName || '导入项目',
     nodes: (project.nodes as WorkflowNode[]).map(cleanNode),
     edges: (project.edges as Edge[]).map(cleanEdge),
     history: Array.isArray(project.history) ? project.history : [],
+    model3DScenes: project.model3DScenes && typeof project.model3DScenes === 'object'
+      ? project.model3DScenes
+      : {},
   }
 }
 
@@ -1043,6 +1278,35 @@ async function addImageToProjectPackage(sessionId: string, imageUrl: string, ind
   return payload.relativePath
 }
 
+async function addVideoToProjectPackage(sessionId: string, videoUrl: string, fileName: string | undefined, index: number) {
+  const payload = await readPackageResponse(
+    await fetch('/api/projects/package/add-video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, videoUrl, fileName, index }),
+    }),
+  )
+  if (!payload?.relativePath) throw new Error('视频写入项目包失败')
+  return payload.relativePath
+}
+
+async function addModelToProjectPackage(
+  sessionId: string,
+  sourceUrl: string,
+  fileName: string,
+  index: number,
+) {
+  const payload = await readPackageResponse(
+    await fetch('/api/projects/package/add-model', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, sourceUrl, fileName, index }),
+    }),
+  )
+  if (!payload?.relativePath) throw new Error('3D 模型写入项目包失败')
+  return payload.relativePath
+}
+
 async function buildPackageProject(
   sessionId: string,
   projectName: string,
@@ -1051,7 +1315,9 @@ async function buildPackageProject(
   history: GenerationRecord[],
 ) {
   const imageCache = new Map<string, string>()
+  const videoCache = new Map<string, string>()
   let imageIndex = 0
+  let videoIndex = 0
 
   async function cacheImage(imageUrl?: string) {
     if (!imageUrl) return imageUrl
@@ -1059,6 +1325,15 @@ async function buildPackageProject(
     imageIndex += 1
     const relativePath = await addImageToProjectPackage(sessionId, imageUrl, imageIndex)
     imageCache.set(imageUrl, relativePath)
+    return relativePath
+  }
+
+  async function cacheVideo(videoUrl?: string, fileName?: string) {
+    if (!videoUrl) return videoUrl
+    if (videoCache.has(videoUrl)) return videoCache.get(videoUrl)
+    videoIndex += 1
+    const relativePath = await addVideoToProjectPackage(sessionId, videoUrl, fileName, videoIndex)
+    videoCache.set(videoUrl, relativePath)
     return relativePath
   }
 
@@ -1070,6 +1345,7 @@ async function buildPackageProject(
       data: {
         ...clean.data,
         imageUrl: await cacheImage(clean.data.imageUrl),
+        videoUrl: await cacheVideo(clean.data.videoUrl, clean.data.sourceName),
         sourceImageUrl: await cacheImage(clean.data.sourceImageUrl),
         maskUrl: await cacheImage(clean.data.maskUrl),
       },
@@ -1085,12 +1361,52 @@ async function buildPackageProject(
     })
   }
 
+  const sceneIds = cleanNodes
+    .map((node) => node.data.model3DSceneId)
+    .filter((sceneId): sceneId is string => Boolean(sceneId))
+  const storedScenes = await readModel3DScenes(sceneIds)
+  const missingSceneIds = [...new Set(sceneIds)].filter((sceneId) => !storedScenes[sceneId])
+  if (missingSceneIds.length) {
+    throw new Error('部分 3D 参考图缺少可编辑场景，请先点击参考图确认场景仍可打开。')
+  }
+  const modelAssetCache = new Map<string, string>()
+  let modelIndex = 0
+  const model3DScenes: Record<string, SavedModel3DScene> = {}
+
+  for (const [sceneId, scene] of Object.entries(storedScenes)) {
+    const items = [] as SavedModel3DScene['items']
+    for (const item of scene.items) {
+      if (item.kind !== 'imported-model' || !item.source?.url) {
+        items.push(item)
+        continue
+      }
+      const cacheKey = `${item.source.fileName}\n${item.source.url}`
+      let packagedUrl = modelAssetCache.get(cacheKey)
+      if (!packagedUrl) {
+        modelIndex += 1
+        packagedUrl = await addModelToProjectPackage(
+          sessionId,
+          item.source.url,
+          item.source.fileName,
+          modelIndex,
+        )
+        modelAssetCache.set(cacheKey, packagedUrl)
+      }
+      items.push({
+        ...item,
+        source: { ...item.source, url: packagedUrl },
+      })
+    }
+    model3DScenes[sceneId] = { ...scene, items }
+  }
+
   return {
-    version: 2,
+    version: 3,
     projectName,
     nodes: cleanNodes,
     edges: edges.map(cleanEdge),
     history: historyWithImages,
+    model3DScenes,
   } satisfies ProjectFile
 }
 
@@ -1309,11 +1625,16 @@ function videoFromResponse(source: unknown) {
   return value
 }
 
-async function requestGeneratedVideo(prompt: string, config: ApiConfig, referenceImageUrls: string[] = []) {
+async function requestGeneratedVideo(
+  prompt: string,
+  config: ApiConfig,
+  referenceImageUrls: string[] = [],
+  referenceVideoUrls: string[] = [],
+) {
   const response = await fetch('/api/videos/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, config, referenceImageUrls }),
+    body: JSON.stringify({ prompt, config, referenceImageUrls, referenceVideoUrls }),
   })
 
   const json = await response.json().catch(() => null)
@@ -1323,6 +1644,53 @@ async function requestGeneratedVideo(prompt: string, config: ApiConfig, referenc
   }
 
   return videoFromResponse(json)
+}
+
+async function cacheReferenceVideoFile(file: File) {
+  const response = await fetch('/api/videos/cache', {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-File-Name': encodeURIComponent(file.name || 'reference-video.mp4'),
+    },
+    body: file,
+  })
+  const payload = (await response.json().catch(() => null)) as { videoUrl?: string; error?: string } | null
+  if (!response.ok || !payload?.videoUrl) throw new Error(payload?.error || '参考视频上传失败')
+  return payload.videoUrl
+}
+
+async function readVideoMetadata(file: File) {
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    return await new Promise<{ duration: number; width: number; height: number }>((resolve, reject) => {
+      const video = document.createElement('video')
+      video.preload = 'metadata'
+      video.onloadedmetadata = () => resolve({
+        duration: Number.isFinite(video.duration) ? video.duration : 0,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      })
+      video.onerror = () => reject(new Error('无法读取参考视频，请确认文件未损坏。'))
+      video.src = objectUrl
+    })
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
+async function validateReferenceVideoFile(file: File) {
+  const extension = file.name.split('.').pop()?.toLowerCase()
+  const acceptedType = file.type === 'video/mp4' || file.type === 'video/quicktime'
+  if (!acceptedType && extension !== 'mp4' && extension !== 'mov') {
+    throw new Error('参考视频仅支持 MP4 或 MOV 格式。')
+  }
+  if (!file.size) throw new Error('参考视频内容为空，请重新选择。')
+  if (file.size > 100 * 1024 * 1024) throw new Error('单个参考视频不能超过 100 MB。')
+  const metadata = await readVideoMetadata(file)
+  if (!metadata.duration) throw new Error('无法读取参考视频时长，请重新选择。')
+  if (metadata.duration > 30.05) throw new Error('单个参考视频不能超过 30 秒。')
+  return metadata
 }
 
 async function requestChange2ProModels(apiKey: string) {
@@ -2002,10 +2370,17 @@ function ApiModeSelect({ value, onChange }: { value: ApiMode; onChange: (mode: A
 function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const updateNodeInternals = useUpdateNodeInternals()
   const replaceImageInputRef = useRef<HTMLInputElement>(null)
+  const replaceVideoInputRef = useRef<HTMLInputElement>(null)
+  const promptTextareaRef = useRef<HTMLTextAreaElement>(null)
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const isPromptComposingRef = useRef(false)
   const lastCommittedPromptRef = useRef(data.prompt || '')
   const [promptDraft, setPromptDraft] = useState(data.prompt || '')
+  const [promptMentionBindings, setPromptMentionBindings] = useState<PromptMentionBinding[]>(data.promptMentions || [])
+  const [mentionMenuOpen, setMentionMenuOpen] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [mentionStart, setMentionStart] = useState(0)
+  const [mentionSelection, setMentionSelection] = useState(0)
   const [referenceImageRatio, setReferenceImageRatio] = useState('—')
   const [referencePixelSize, setReferencePixelSize] = useState('')
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
@@ -2013,12 +2388,20 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const isVideo = data.kind === 'video'
   const isPrompt = data.kind === 'prompt'
   const isReference = data.kind === 'reference'
+  const isVideoReference = data.kind === 'video-reference'
   const isRepaint = data.kind === 'repaint'
   const isOutpaint = data.kind === 'outpaint'
   const isGroup = data.kind === 'group'
   const isGenerating = data.status === 'generating'
   const isDone = data.status === 'done'
   const isError = data.status === 'error'
+  const promptMentionOptions = isPrompt ? (data.promptMentionOptions || []) : []
+  const filteredPromptMentionOptions = promptMentionOptions.filter((option) => {
+    const query = mentionQuery.trim().toLocaleLowerCase()
+    if (!query) return true
+    return option.token.toLocaleLowerCase().includes(query) || option.label.toLocaleLowerCase().includes(query)
+  })
+  const visiblePromptMentions = activePromptMentions(promptDraft, promptMentionBindings)
   const selectedAspectRatio = getAspectRatioOption(data.size)
   const brushSize = data.brushSize || 36
   const brushColor = data.brushColor || 'red'
@@ -2041,10 +2424,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     ? Math.min(videoModelConfig.maxDuration, Math.max(videoModelConfig.minDuration, Math.round(requestedVideoDuration)))
     : videoModelConfig.defaultDuration
   const hasNodeModelPicker = usesApiMartNodeSettings && (isImage || isVideo)
+  const supportsReferenceVideo = isVideo && videoModelConfig.maxReferenceVideos > 0
   const modelOptions: Array<{ id: string; label: string }> = isVideo ? apiMartVideoModels : apiMartModels
   const selectedModelId = isVideo ? videoModelConfig.id : imageModelConfig.id
   const selectedModelLabel = isVideo ? videoModelConfig.label : imageModelConfig.label
-  const nodeTitle = isReference
+  const nodeTitle = isReference || isVideoReference
     ? (data.sourceName || data.title)
     : isImage || isVideo
       ? (apiModelDisplayName(configuredModelName) || data.title)
@@ -2054,11 +2438,19 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       ? data.imageInputSlots
       : [{ id: `${imageInputHandlePrefix}1`, index: 1, connected: false }]
     : [{ id: 'image', index: 1, connected: Boolean(data.imageInputConnected) }]
-  const totalInputSlots = 1 + imageInputSlots.length
+  const videoInputSlots = supportsReferenceVideo
+    ? data.videoInputSlots?.length
+      ? data.videoInputSlots
+      : [{ id: `${videoInputHandlePrefix}1`, index: 1, connected: false }]
+    : []
+  const totalInputSlots = 1 + imageInputSlots.length + videoInputSlots.length
   const inputPortSpan = Math.min(60, (totalInputSlots - 1) * 12)
   const inputPortStep = totalInputSlots > 1 ? inputPortSpan / (totalInputSlots - 1) : 0
   const inputPortTop = (rowIndex: number) => `${50 - inputPortSpan / 2 + inputPortStep * rowIndex}%`
-  const imageSlotSignature = imageInputSlots.map((slot) => `${slot.id}:${slot.connected}`).join('|')
+  const imageSlotSignature = [
+    ...imageInputSlots.map((slot) => `${slot.id}:${slot.connected}`),
+    ...videoInputSlots.map((slot) => `${slot.id}:${slot.connected}`),
+  ].join('|')
 
   useEffect(() => {
     updateNodeInternals(nodeId)
@@ -2075,6 +2467,10 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     lastCommittedPromptRef.current = nextPrompt
     if (!isPromptComposingRef.current) setPromptDraft(nextPrompt)
   }, [data.prompt])
+
+  useEffect(() => {
+    setPromptMentionBindings(data.promptMentions || [])
+  }, [data.promptMentions])
 
   useEffect(() => {
     if (!isModelMenuOpen) return
@@ -2106,10 +2502,61 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     setIsModelMenuOpen(false)
   }
 
-  const commitPromptDraft = (nextPrompt: string) => {
-    if (lastCommittedPromptRef.current === nextPrompt) return
+  const commitPromptDraft = (nextPrompt: string, nextMentions?: PromptMentionBinding[]) => {
+    const retainedMentions = (nextMentions || promptMentionBindings).filter((mention) => promptContainsMentionToken(nextPrompt, mention.token))
+    setPromptMentionBindings(retainedMentions)
+    if (lastCommittedPromptRef.current === nextPrompt && nextMentions === undefined) return
     lastCommittedPromptRef.current = nextPrompt
-    data.onChangePrompt?.(nodeId, nextPrompt)
+    data.onChangePrompt?.(nodeId, nextPrompt, retainedMentions)
+  }
+
+  const updatePromptMentionMenu = (value: string, caret: number | null) => {
+    if (!isPrompt || caret === null) {
+      setMentionMenuOpen(false)
+      return
+    }
+    const beforeCaret = value.slice(0, caret)
+    const match = beforeCaret.match(/@([^\s@，。！？；：]*)$/)
+    if (!match) {
+      setMentionMenuOpen(false)
+      return
+    }
+    setMentionStart(caret - match[0].length)
+    setMentionQuery(match[1])
+    setMentionSelection(0)
+    setMentionMenuOpen(true)
+  }
+
+  const insertPromptMention = (option: PromptMentionOption) => {
+    const textarea = promptTextareaRef.current
+    const caret = textarea?.selectionStart ?? promptDraft.length
+    const existingBinding = promptMentionBindings.find((mention) => mention.nodeId === option.nodeId)
+    let token = existingBinding?.token || option.token
+    if (promptMentionBindings.some((mention) => mention.token === token && mention.nodeId !== option.nodeId)) {
+      const prefix = option.kind === 'image' ? '@Image' : '@Video'
+      let suffix = 1
+      while (promptMentionBindings.some((mention) => mention.token === `${prefix}${suffix}`)) suffix += 1
+      token = `${prefix}${suffix}`
+    }
+    const nextPrompt = `${promptDraft.slice(0, mentionStart)}${token} ${promptDraft.slice(caret)}`
+    const nextBinding: PromptMentionBinding = {
+      token,
+      nodeId: option.nodeId,
+      kind: option.kind,
+      label: option.label,
+    }
+    const nextMentions = [
+      ...promptMentionBindings.filter((mention) => mention.nodeId !== option.nodeId && mention.token !== token),
+      nextBinding,
+    ]
+    setPromptDraft(nextPrompt)
+    commitPromptDraft(nextPrompt, nextMentions)
+    setMentionMenuOpen(false)
+    window.setTimeout(() => {
+      const nextCaret = mentionStart + token.length + 1
+      promptTextareaRef.current?.focus()
+      promptTextareaRef.current?.setSelectionRange(nextCaret, nextCaret)
+    }, 0)
   }
 
   if (isGroup) {
@@ -2183,9 +2630,30 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               />,
             ]
           })}
+          {videoInputSlots.map((slot, index) => {
+            const label = `Video ${slot.index}`
+            const top = inputPortTop(imageInputSlots.length + index)
+            return [
+              <span key={`${slot.id}-label`} className="node-port-label video-input-label" style={{ top }} aria-hidden="true">
+                <Video size={13} />
+                {label}
+              </span>,
+              <Handle
+                key={slot.id}
+                id={slot.id}
+                type="target"
+                position={Position.Left}
+                className={`node-handle video-input-handle ${slot.connected ? 'connected' : ''}`}
+                style={{ top }}
+                isConnectable={!slot.connected}
+                aria-label={`${label} 输入`}
+                title={`连接到 ${label}，或向左拖出参考视频节点`}
+              />,
+            ]
+          })}
           <span
             className="node-port-label prompt-input-label"
-            style={{ top: inputPortTop(imageInputSlots.length) }}
+            style={{ top: inputPortTop(imageInputSlots.length + videoInputSlots.length) }}
             aria-hidden="true"
           >
             <Wand2 size={13} />
@@ -2196,7 +2664,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             type="target"
             position={Position.Left}
             className={`node-handle prompt-input-handle ${data.promptInputConnected ? 'connected' : ''}`}
-            style={{ top: inputPortTop(imageInputSlots.length) }}
+            style={{ top: inputPortTop(imageInputSlots.length + videoInputSlots.length) }}
             isConnectable={!data.promptInputConnected}
             aria-label="Prompt 输入"
             title="连接提示词节点，或向左拖出提示词节点"
@@ -2212,6 +2680,8 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           ) : isImage ? (
             <ImageIcon size={15} />
           ) : isVideo ? (
+            <Video size={15} />
+          ) : isVideoReference ? (
             <Video size={15} />
           ) : isReference ? (
             <UploadCloud size={15} />
@@ -2263,20 +2733,22 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             </div>
           ) : (
             <span
-              className={isReference ? 'reference-file-title' : undefined}
-              title={(isReference || isImage || isVideo) ? nodeTitle : undefined}
+              className={(isReference || isVideoReference) ? 'reference-file-title' : undefined}
+              title={(isReference || isVideoReference || isImage || isVideo) ? nodeTitle : undefined}
             >
               {nodeTitle}
             </span>
           )}
         </div>
-        {isReference ? (
+        {isReference || isVideoReference ? (
           <div
             className="reference-pixel-ratio"
-            title={referencePixelSize ? `原始像素 ${referencePixelSize}` : '正在读取图片比例'}
-            aria-label={`上传图片比例 ${referenceImageRatio}`}
+            title={isVideoReference
+              ? (data.videoDurationSeconds ? `参考视频 ${data.videoDurationSeconds.toFixed(1)} 秒` : '参考视频')
+              : referencePixelSize ? `原始像素 ${referencePixelSize}` : '正在读取图片比例'}
+            aria-label={isVideoReference ? '参考视频' : `上传图片比例 ${referenceImageRatio}`}
           >
-            {referenceImageRatio}
+            {isVideoReference ? 'VIDEO' : referenceImageRatio}
           </div>
         ) : (isImage || isVideo || isRepaint || isOutpaint) ? (
           <button
@@ -2308,26 +2780,106 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               </button>
             )}
           </span>
-          <textarea
-            value={promptDraft}
-            rows={isRepaint ? 4 : isOutpaint ? 6 : 5}
-            placeholder={isRepaint ? '描述涂抹区域要重绘成什么' : isOutpaint ? '描述希望扩展出的画面内容' : '输入提示词'}
-            onCompositionStart={() => {
-              isPromptComposingRef.current = true
-            }}
-            onCompositionEnd={(event) => {
-              isPromptComposingRef.current = false
-              const nextPrompt = event.currentTarget.value
-              setPromptDraft(nextPrompt)
-              commitPromptDraft(nextPrompt)
-            }}
-            onKeyDown={(event) => event.stopPropagation()}
-            onChange={(event) => {
-              const nextPrompt = event.currentTarget.value
-              setPromptDraft(nextPrompt)
-              if (!isPromptComposingRef.current) commitPromptDraft(nextPrompt)
-            }}
-          />
+          <div className="prompt-editor-shell">
+            <textarea
+              ref={promptTextareaRef}
+              value={promptDraft}
+              rows={isRepaint ? 4 : isOutpaint ? 6 : 5}
+              placeholder={isRepaint ? '描述涂抹区域要重绘成什么' : isOutpaint ? '描述希望扩展出的画面内容' : isPrompt ? '输入提示词，键入 @ 引用已连接素材' : '输入提示词'}
+              onCompositionStart={() => {
+                isPromptComposingRef.current = true
+              }}
+              onCompositionEnd={(event) => {
+                isPromptComposingRef.current = false
+                const nextPrompt = event.currentTarget.value
+                setPromptDraft(nextPrompt)
+                commitPromptDraft(nextPrompt)
+                updatePromptMentionMenu(nextPrompt, event.currentTarget.selectionStart)
+              }}
+              onKeyDown={(event) => {
+                if (mentionMenuOpen && !isPromptComposingRef.current) {
+                  if (event.key === 'ArrowDown' && filteredPromptMentionOptions.length) {
+                    event.preventDefault()
+                    setMentionSelection((current) => (current + 1) % filteredPromptMentionOptions.length)
+                  } else if (event.key === 'ArrowUp' && filteredPromptMentionOptions.length) {
+                    event.preventDefault()
+                    setMentionSelection((current) => (current - 1 + filteredPromptMentionOptions.length) % filteredPromptMentionOptions.length)
+                  } else if ((event.key === 'Enter' || event.key === 'Tab') && filteredPromptMentionOptions[mentionSelection]) {
+                    event.preventDefault()
+                    insertPromptMention(filteredPromptMentionOptions[mentionSelection])
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault()
+                    setMentionMenuOpen(false)
+                  }
+                }
+                event.stopPropagation()
+              }}
+              onClick={(event) => updatePromptMentionMenu(event.currentTarget.value, event.currentTarget.selectionStart)}
+              onBlur={() => window.setTimeout(() => setMentionMenuOpen(false), 80)}
+              onChange={(event) => {
+                const nextPrompt = event.currentTarget.value
+                setPromptDraft(nextPrompt)
+                if (!isPromptComposingRef.current) {
+                  commitPromptDraft(nextPrompt)
+                  updatePromptMentionMenu(nextPrompt, event.currentTarget.selectionStart)
+                }
+              }}
+            />
+            {isPrompt && mentionMenuOpen && (
+              <div className="prompt-mention-menu nodrag nopan nowheel" role="listbox" aria-label="可引用素材">
+                <div className="prompt-mention-menu-title"><AtSign size={13} /> 引用已连接素材</div>
+                {filteredPromptMentionOptions.length ? filteredPromptMentionOptions.map((option, index) => (
+                  <button
+                    key={`${option.nodeId}-${option.kind}`}
+                    className={`prompt-mention-option ${index === mentionSelection ? 'selected' : ''}`}
+                    type="button"
+                    role="option"
+                    aria-selected={index === mentionSelection}
+                    onPointerDown={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      insertPromptMention(option)
+                    }}
+                  >
+                    <span className="prompt-mention-preview" aria-hidden="true">
+                      {option.kind === 'image' && option.previewUrl
+                        ? <img src={option.previewUrl} alt="" draggable={false} />
+                        : <Video size={15} />}
+                    </span>
+                    <span className="prompt-mention-option-copy">
+                      <strong>{option.token}</strong>
+                      <small>{option.label}</small>
+                    </span>
+                    <em>{option.kind === 'image' ? `Image ${option.slotIndex}` : `Video ${option.slotIndex}`}</em>
+                  </button>
+                )) : (
+                  <div className="prompt-mention-empty">
+                    {promptMentionOptions.length ? '没有匹配的素材' : '请先把提示词与参考素材连接到同一个生成框'}
+                  </div>
+                )}
+              </div>
+            )}
+            {isPrompt && visiblePromptMentions.length > 0 && (
+              <div className="prompt-mention-chips" aria-label="提示词已引用素材">
+                {visiblePromptMentions.map((mention) => {
+                  const available = promptMentionOptions.some((option) => option.nodeId === mention.nodeId)
+                  return (
+                    <button
+                      key={`${mention.token}-${mention.nodeId}`}
+                      className={available ? '' : 'missing'}
+                      type="button"
+                      title={available ? `定位 ${mention.label}` : `${mention.label} 未连接到当前生成框`}
+                      onClick={() => data.onLocatePromptMention?.(mention.nodeId)}
+                    >
+                      {mention.kind === 'image' ? <ImageIcon size={11} /> : <Video size={11} />}
+                      {mention.token}
+                      {!available && <AlertTriangle size={11} />}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         </label>
       ) : (
         data.prompt && <p className="node-prompt">{data.prompt}</p>
@@ -2335,19 +2887,42 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
       {(isImage || isReference) && (
         data.imageUrl && !isGenerating ? (
-          <img
-            className="node-image"
-            src={data.imageUrl}
-            alt={isReference ? (data.sourceName || data.title) : data.title}
-            draggable={false}
-            style={isImage ? { aspectRatio: selectedAspectRatio.cssRatio } : undefined}
-            onLoad={(event) => {
-              if (!isReference) return
-              const { naturalWidth, naturalHeight } = event.currentTarget
-              setReferenceImageRatio(getReferenceImageRatio(naturalWidth, naturalHeight))
-              setReferencePixelSize(`${naturalWidth} × ${naturalHeight}`)
-            }}
-          />
+          isReference && data.model3DSceneId ? (
+            <button
+              className="model3d-reference-preview nodrag nopan nowheel"
+              type="button"
+              title="继续编辑这个 3D 场景"
+              aria-label="继续编辑这个 3D 场景"
+              onClick={() => data.onEditModel3D?.(nodeId)}
+            >
+              <img
+                className="node-image"
+                src={data.imageUrl}
+                alt={data.sourceName || data.title}
+                draggable={false}
+                onLoad={(event) => {
+                  const { naturalWidth, naturalHeight } = event.currentTarget
+                  setReferenceImageRatio(getReferenceImageRatio(naturalWidth, naturalHeight))
+                  setReferencePixelSize(`${naturalWidth} × ${naturalHeight}`)
+                }}
+              />
+              <span className="model3d-reference-badge"><Box size={13} /> 继续编辑 3D</span>
+            </button>
+          ) : (
+            <img
+              className="node-image"
+              src={data.imageUrl}
+              alt={isReference ? (data.sourceName || data.title) : data.title}
+              draggable={false}
+              style={isImage ? { aspectRatio: selectedAspectRatio.cssRatio } : undefined}
+              onLoad={(event) => {
+                if (!isReference) return
+                const { naturalWidth, naturalHeight } = event.currentTarget
+                setReferenceImageRatio(getReferenceImageRatio(naturalWidth, naturalHeight))
+                setReferencePixelSize(`${naturalWidth} × ${naturalHeight}`)
+              }}
+            />
+          )
         ) : (
           <div
             className={`node-empty ${isGenerating ? 'generating' : ''}`}
@@ -2365,6 +2940,24 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 <span>等待图像</span>
               </>
             )}
+          </div>
+        )
+      )}
+
+      {isVideoReference && (
+        data.videoUrl ? (
+          <video
+            className="node-video reference-video-preview nodrag nopan nowheel"
+            src={data.videoUrl}
+            controls
+            playsInline
+            preload="metadata"
+          />
+        ) : (
+          <div className="node-empty reference-video-empty" aria-live="polite">
+            <Video size={30} />
+            <span>等待参考视频</span>
+            <small>支持 MP4、MOV，最大 100 MB</small>
           </div>
         )
       )}
@@ -2589,6 +3182,36 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 </button>
               </>
             )}
+            {isVideoReference && (
+              <>
+                <input
+                  ref={replaceVideoInputRef}
+                  className="node-replace-input nodrag nopan"
+                  type="file"
+                  accept="video/mp4,video/quicktime,.mp4,.mov"
+                  aria-label="替换参考视频"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    event.target.value = ''
+                    if (file) data.onReplaceVideo?.(nodeId, file)
+                  }}
+                />
+                <button
+                  className="node-replace-button nodrag nopan"
+                  type="button"
+                  title={data.videoUrl ? '替换参考视频' : '上传参考视频'}
+                  onClick={() => replaceVideoInputRef.current?.click()}
+                >
+                  {data.videoUrl ? <RefreshCw size={13} /> : <UploadCloud size={13} />}
+                  <span>{data.videoUrl ? '替换' : '上传'}</span>
+                </button>
+                {data.videoDurationSeconds ? (
+                  <span className="reference-video-duration" title="参考视频时长">
+                    {data.videoDurationSeconds.toFixed(1)}s
+                  </span>
+                ) : null}
+              </>
+            )}
             {data.imageUrl && (
               <button type="button" title="下载图像" onClick={() => data.onDownload?.(nodeId)}>
                 <Download size={14} />
@@ -2705,6 +3328,7 @@ const workflowEdgeTypes = { disconnectible: DisconnectibleEdge } satisfies EdgeT
 export default function App() {
   const importInputRef = useRef<HTMLInputElement>(null)
   const referenceInputRef = useRef<HTMLInputElement>(null)
+  const referenceVideoInputRef = useRef<HTMLInputElement>(null)
   const openedProjectHandleRef = useRef<ProjectArchiveFileHandle | null>(null)
   const pendingNodePositionRef = useRef<XYPosition | null>(null)
   const connectingFromNodeIdRef = useRef<string | null>(null)
@@ -2717,6 +3341,11 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [showModelStudio, setShowModelStudio] = useState(false)
+  const [model3DEditSession, setModel3DEditSession] = useState<{
+    nodeId: string | null
+    sceneId: string | null
+    scene: SavedModel3DScene | null
+  }>({ nodeId: null, sceneId: null, scene: null })
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
   const [historyImagePreview, setHistoryImagePreview] = useState<HistoryImagePreview | null>(null)
   const [historyImageNaturalSize, setHistoryImageNaturalSize] = useState<{ width: number; height: number } | null>(null)
@@ -2832,14 +3461,23 @@ export default function App() {
       const sourceNode = nodes.find((node) => node.id === connection.source)
       const targetNode = nodes.find((node) => node.id === connection.target)
       const targetsImageInput = isImageInputHandle(connection.targetHandle)
+      const targetsVideoInput = isVideoInputHandle(connection.targetHandle)
 
       if (targetNode?.data.kind === 'image' || targetNode?.data.kind === 'video' || targetNode?.data.kind === 'repaint' || targetNode?.data.kind === 'outpaint') {
         if (targetsImageInput && sourceNode?.data.kind === 'prompt') {
           setToast('提示词节点请连接到 Prompt 输入。')
           return
         }
+        if (targetsImageInput && sourceNode?.data.kind === 'video-reference') {
+          setToast('参考视频请连接到 Video 输入。')
+          return
+        }
+        if (targetsVideoInput && sourceNode?.data.kind !== 'video-reference' && sourceNode?.data.kind !== 'video') {
+          setToast('Video 输入仅支持参考视频节点或已生成的视频。')
+          return
+        }
         if (connection.targetHandle === 'prompt' && sourceNode?.data.kind !== 'prompt') {
-          setToast('参考图和生成图请连接到 Image 输入。')
+          setToast('参考素材请连接到对应的 Image 或 Video 输入。')
           return
         }
       }
@@ -2914,10 +3552,25 @@ export default function App() {
       const idsToDelete = collectNodeFamilyIds(nodeIds, nodes)
       if (!idsToDelete.size) return
 
+      const remainingSceneIds = new Set(
+        nodes
+          .filter((node) => !idsToDelete.has(node.id))
+          .map((node) => node.data.model3DSceneId)
+          .filter((sceneId): sceneId is string => Boolean(sceneId)),
+      )
+      const sceneIdsToDelete = new Set(
+        nodes
+          .filter((node) => idsToDelete.has(node.id))
+          .map((node) => node.data.model3DSceneId)
+          .filter((sceneId): sceneId is string => Boolean(sceneId))
+          .filter((sceneId) => !remainingSceneIds.has(sceneId)),
+      )
+
       setNodes((current) => current.filter((node) => !idsToDelete.has(node.id)))
       setEdges((current) => current.filter((edge) => !idsToDelete.has(edge.source) && !idsToDelete.has(edge.target)))
       setSelectedNodeId((current) => (current && idsToDelete.has(current) ? null : current))
       setLightDirectionNodeId((current) => (current && idsToDelete.has(current) ? null : current))
+      sceneIdsToDelete.forEach((sceneId) => void deleteModel3DScene(sceneId))
       markDirty()
       setToast(idsToDelete.size > 1 ? `已删除 ${idsToDelete.size} 个画布节点。` : '已删除选中的画布节点。')
     },
@@ -3181,15 +3834,27 @@ export default function App() {
   const changeNodeVideoModel = useCallback(
     (nodeId: string, modelId: string) => {
       const model = findApiMartVideoModel(modelId)
+      setEdges((current) => normalizeImageInputEdges(
+        current.filter((edge) => {
+          if (edge.target !== nodeId || !isVideoInputHandle(edge.targetHandle)) return true
+          const index = videoInputHandleIndex(edge.targetHandle) || 1
+          return index <= model.maxReferenceVideos
+        }),
+        nodes,
+      ))
       updateNodeData(nodeId, {
         model: model.id,
         videoResolution: model.defaultResolution,
         videoDuration: model.defaultDuration,
         error: undefined,
       })
-      setToast(`视频模型已切换为 ${model.label}。`)
+      setToast(
+        model.maxReferenceVideos
+          ? `视频模型已切换为 ${model.label}，可连接参考视频。`
+          : `视频模型已切换为 ${model.label}；该模型不显示参考视频接口。`,
+      )
     },
-    [updateNodeData],
+    [nodes, setEdges, updateNodeData],
   )
 
   const changeNodeVideoResolution = useCallback(
@@ -3221,10 +3886,29 @@ export default function App() {
   )
 
   const changeNodePrompt = useCallback(
-    (nodeId: string, value: string) => {
-      updateNodeData(nodeId, { prompt: value })
+    (nodeId: string, value: string, mentions?: PromptMentionBinding[]) => {
+      updateNodeData(nodeId, {
+        prompt: value,
+        ...(mentions !== undefined ? { promptMentions: mentions } : {}),
+      })
     },
     [updateNodeData],
+  )
+
+  const locatePromptMention = useCallback(
+    (referenceNodeId: string) => {
+      const referenceNode = nodes.find((node) => node.id === referenceNodeId)
+      if (!referenceNode) {
+        setToast('这个引用素材已经不在画布中。')
+        return
+      }
+      setNodes((current) => current.map((node) => ({ ...node, selected: node.id === referenceNodeId })))
+      setSelectedNodeId(referenceNodeId)
+      window.setTimeout(() => {
+        void flowInstance?.fitView({ nodes: [{ id: referenceNodeId }], padding: 0.42, maxZoom: 1, duration: 220 })
+      }, 0)
+    },
+    [flowInstance, nodes, setNodes],
   )
 
   const changeNodeMask = useCallback(
@@ -3600,10 +4284,11 @@ export default function App() {
     (targetNode: WorkflowNode, targetHandleId: string | null, dropPosition: XYPosition) => {
       const createsPrompt = targetHandleId === 'prompt'
       const createsReference = isImageInputHandle(targetHandleId)
-      if (!createsPrompt && !createsReference) return
+      const createsReferenceVideo = isVideoInputHandle(targetHandleId)
+      if (!createsPrompt && !createsReference && !createsReferenceVideo) return
 
       const createdAt = new Date().toLocaleString('zh-CN')
-      const inputNodeId = id(createsPrompt ? 'prompt' : 'ref')
+      const inputNodeId = id(createsPrompt ? 'prompt' : createsReferenceVideo ? 'video-ref' : 'ref')
       const nodeWidth = createsPrompt ? 330 : 312
       const node: WorkflowNode = {
         id: inputNodeId,
@@ -3623,14 +4308,23 @@ export default function App() {
               size: targetNode.data.size || apiConfig.size,
               createdAt,
             }
-          : {
+          : createsReferenceVideo
+            ? {
+                kind: 'video-reference',
+                title: '参考视频',
+                status: 'idle',
+                model: '上传',
+                size: targetNode.data.size || apiConfig.size,
+                createdAt,
+              }
+            : {
               kind: 'reference',
               title: '参考图像',
               status: 'idle',
               model: '上传',
               size: targetNode.data.size || apiConfig.size,
               createdAt,
-            },
+              },
       }
       const edge: Edge = {
         id: id('edge'),
@@ -3650,7 +4344,13 @@ export default function App() {
       setEdges((current) => normalizeImageInputEdges([...current, edge], [...nodes, node]))
       setSelectedNodeId(inputNodeId)
       markDirty()
-      setToast(createsPrompt ? '已拖出并连接空白提示词节点。' : '已拖出并连接空白参考图节点，请上传图片。')
+      setToast(
+        createsPrompt
+          ? '已拖出并连接空白提示词节点。'
+          : createsReferenceVideo
+            ? '已拖出并连接空白参考视频节点，请上传视频。'
+            : '已拖出并连接空白参考图节点，请上传图片。',
+      )
     },
     [apiConfig.model, apiConfig.size, markDirty, nodes, setEdges, setNodes],
   )
@@ -3761,7 +4461,14 @@ export default function App() {
       (edge) => edge.targetHandle === 'prompt' || (!edge.targetHandle && nodeKindById.get(edge.source) === 'prompt'),
     )
     const imageInputEdges = incomingEdges.filter(
-      (edge) => isImageInputHandle(edge.targetHandle) || (!edge.targetHandle && nodeKindById.get(edge.source) !== 'prompt'),
+      (edge) => isImageInputHandle(edge.targetHandle) || (
+        !edge.targetHandle &&
+        nodeKindById.get(edge.source) !== 'prompt' &&
+        nodeKindById.get(edge.source) !== 'video-reference'
+      ),
+    )
+    const videoInputEdges = incomingEdges.filter(
+      (edge) => isVideoInputHandle(edge.targetHandle) || (!edge.targetHandle && nodeKindById.get(edge.source) === 'video-reference'),
     )
     const connectedImageIndexes = new Set(
       imageInputEdges.map((edge, index) => imageInputHandleIndex(edge.targetHandle) ?? index + 1),
@@ -3774,6 +4481,24 @@ export default function App() {
       index: index + 1,
       connected: connectedImageIndexes.has(index + 1),
     }))
+    const connectedVideoIndexes = new Set(
+      videoInputEdges.map((edge, index) => videoInputHandleIndex(edge.targetHandle) ?? index + 1),
+    )
+    const highestConnectedVideoIndex = Math.max(0, ...connectedVideoIndexes)
+    const videoModel = node.data.kind === 'video'
+      ? findApiMartVideoModel(node.data.model || apiConfig.videoModel)
+      : null
+    const visibleVideoSlotCount = videoModel?.maxReferenceVideos
+      ? Math.min(videoModel.maxReferenceVideos, Math.max(1, highestConnectedVideoIndex + 1))
+      : 0
+    const videoInputSlots = Array.from({ length: visibleVideoSlotCount }, (_, index) => ({
+      id: `${videoInputHandlePrefix}${index + 1}`,
+      index: index + 1,
+      connected: connectedVideoIndexes.has(index + 1),
+    }))
+    const promptMentionOptions = node.data.kind === 'prompt'
+      ? promptMentionOptionsForNode(node.id, nodes, edges)
+      : undefined
 
     return {
       ...node,
@@ -3791,12 +4516,16 @@ export default function App() {
         promptInputConnected,
         imageInputConnected: imageInputEdges.length > 0,
         imageInputSlots,
+        videoInputConnected: videoInputEdges.length > 0,
+        videoInputSlots,
+        promptMentionOptions,
         outputConnected: edges.some((edge) => edge.source === node.id),
         memberCount: node.data.kind === 'group' ? nodes.filter((item) => item.parentId === node.id).length : undefined,
         onDelete: deleteNode,
         onDownload: downloadNodeImage,
         onRevealImage: (nodeId: string) => void revealNodeImage(nodeId),
         onReplaceImage: replaceReferenceImage,
+        onReplaceVideo: (nodeId: string, file: File) => void replaceReferenceVideo(nodeId, file),
         onGenerate: (nodeId: string) => void generateFromNode(nodeId),
         onChangeImageModel: changeNodeImageModel,
         onChangeImageSize: changeNodeImageSize,
@@ -3805,8 +4534,10 @@ export default function App() {
         onChangeVideoResolution: changeNodeVideoResolution,
         onChangeVideoDuration: changeNodeVideoDuration,
         onOpenLightDirection: openLightDirectionEditor,
+        onEditModel3D: (nodeId: string) => void openModel3DFromNode(nodeId),
         onCreateRepaint: createRepaintFromNode,
         onChangePrompt: changeNodePrompt,
+        onLocatePromptMention: locatePromptMention,
         onChangeMask: changeNodeMask,
         onChangeBrush: changeNodeBrush,
         onChangeBrushColor: changeNodeBrushColor,
@@ -3970,7 +4701,7 @@ export default function App() {
       )?.sourceNode ??
       incomingInputs.find(({ edge, sourceNode }) => !edge.targetHandle && sourceNode.data.kind === 'prompt' && sourceNode.data.prompt?.trim())
         ?.sourceNode
-    const referenceImageUrls = incomingInputs
+    const referenceImageSources = incomingInputs
       .filter(
         ({ edge, sourceNode }) =>
           Boolean(sourceNode.data.imageUrl) &&
@@ -3984,7 +4715,7 @@ export default function App() {
         if (leftIndex === null && rightIndex !== null) return 1
         return left.edgeOrder - right.edgeOrder
       })
-      .map(({ sourceNode }) => sourceNode.data.imageUrl as string)
+    const referenceImageUrls = referenceImageSources.map(({ sourceNode }) => sourceNode.data.imageUrl as string)
     const trimmed =
       promptSourceNode?.data.prompt?.trim() ||
       node.data.prompt?.trim() ||
@@ -4006,6 +4737,26 @@ export default function App() {
           ? node.data.imageSize
           : imageModel.defaultResolution)
       : apiConfig.imageSize
+    if (imageModel && referenceImageUrls.length > imageModel.maxReferenceImages) {
+      const message = `${imageModel.label} 最多支持 ${imageModel.maxReferenceImages} 张参考图。`
+      updateNodeData(nodeId, { status: 'error', error: message })
+      setToast(message)
+      return
+    }
+    let compiledPrompt = trimmed
+    try {
+      compiledPrompt = compilePromptMentions(
+        trimmed,
+        promptSourceNode?.data.promptMentions || node.data.promptMentions || [],
+        referenceImageSources.map(({ sourceNode }) => sourceNode.id),
+        [],
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '提示词引用校验失败'
+      updateNodeData(nodeId, { status: 'error', error: message })
+      setToast(message)
+      return
+    }
     const configForNode = { ...apiConfig, model: selectedModel, imageSize, size: outputSize }
     const createdAt = new Date().toLocaleString('zh-CN')
 
@@ -4019,7 +4770,7 @@ export default function App() {
     })
 
     try {
-      const orderedPrompt = promptWithReferenceImageOrder(trimmed, referenceImageUrls.length)
+      const orderedPrompt = promptWithReferenceImageOrder(compiledPrompt, referenceImageUrls.length)
       const connectedLightDirection = incomingInputs
         .filter(
           ({ edge, sourceNode }) =>
@@ -4100,7 +4851,7 @@ export default function App() {
           sourceNode.data.prompt?.trim() &&
           (edge.targetHandle === 'prompt' || !edge.targetHandle),
       )?.sourceNode
-    const referenceImageUrls = incomingSources
+    const referenceImageSources = incomingSources
       .filter(
         ({ edge, sourceNode }) =>
           Boolean(sourceNode.data.imageUrl) &&
@@ -4114,7 +4865,22 @@ export default function App() {
         if (leftIndex === null && rightIndex !== null) return 1
         return left.edgeOrder - right.edgeOrder
       })
-      .map(({ sourceNode }) => sourceNode.data.imageUrl as string)
+    const referenceImageUrls = referenceImageSources.map(({ sourceNode }) => sourceNode.data.imageUrl as string)
+    const referenceVideoSources = incomingSources
+      .filter(
+        ({ edge, sourceNode }) =>
+          Boolean(sourceNode.data.videoUrl) &&
+          (isVideoInputHandle(edge.targetHandle) || sourceNode.data.kind === 'video-reference'),
+      )
+      .sort((left, right) => {
+        const leftIndex = videoInputHandleIndex(left.edge.targetHandle)
+        const rightIndex = videoInputHandleIndex(right.edge.targetHandle)
+        if (leftIndex !== null && rightIndex !== null && leftIndex !== rightIndex) return leftIndex - rightIndex
+        if (leftIndex !== null && rightIndex === null) return -1
+        if (leftIndex === null && rightIndex !== null) return 1
+        return left.edgeOrder - right.edgeOrder
+      })
+    const referenceVideoUrls = referenceVideoSources.map(({ sourceNode }) => sourceNode.data.videoUrl as string)
     const trimmed = promptSourceNode?.data.prompt?.trim() || node.data.prompt?.trim() || ''
 
     if (!trimmed) {
@@ -4136,6 +4902,39 @@ export default function App() {
     const videoDuration = Number.isFinite(requestedVideoDuration)
       ? Math.min(videoModel.maxDuration, Math.max(videoModel.minDuration, Math.round(requestedVideoDuration)))
       : videoModel.defaultDuration
+    if (referenceVideoUrls.length > videoModel.maxReferenceVideos) {
+      updateNodeData(nodeId, {
+        status: 'error',
+        error: `${videoModel.label} 最多支持 ${videoModel.maxReferenceVideos} 个参考视频。`,
+      })
+      return
+    }
+    const referenceVideoDuration = referenceVideoSources.reduce(
+      (total, { sourceNode }) => total + (sourceNode.data.videoDurationSeconds || 0),
+      0,
+    )
+    const maxReferenceDuration = videoModel.id === 'seedance-2.0' ? 15 : 30
+    if (referenceVideoDuration > maxReferenceDuration + 0.05) {
+      updateNodeData(nodeId, {
+        status: 'error',
+        error: `${videoModel.label} 的参考视频总时长不能超过 ${maxReferenceDuration} 秒。`,
+      })
+      return
+    }
+    let compiledPrompt = trimmed
+    try {
+      compiledPrompt = compilePromptMentions(
+        trimmed,
+        promptSourceNode?.data.promptMentions || node.data.promptMentions || [],
+        referenceImageSources.map(({ sourceNode }) => sourceNode.id),
+        referenceVideoSources.map(({ sourceNode }) => sourceNode.id),
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '提示词引用校验失败'
+      updateNodeData(nodeId, { status: 'error', error: message })
+      setToast(message)
+      return
+    }
     const configForNode = {
       ...apiConfig,
       videoModel: videoModel.id,
@@ -4155,8 +4954,11 @@ export default function App() {
     })
 
     try {
-      const orderedPrompt = promptWithReferenceImageOrder(trimmed, referenceImageUrls.length)
-      const videoUrl = await requestGeneratedVideo(orderedPrompt, configForNode, referenceImageUrls)
+      const orderedPrompt = promptWithReferenceVideoOrder(
+        promptWithReferenceImageOrder(compiledPrompt, referenceImageUrls.length),
+        referenceVideoUrls.length,
+      )
+      const videoUrl = await requestGeneratedVideo(orderedPrompt, configForNode, referenceImageUrls, referenceVideoUrls)
       updateNodeData(nodeId, {
         videoUrl,
         status: 'done',
@@ -4169,7 +4971,10 @@ export default function App() {
       const referenceSummary = referenceImageUrls.length
         ? `，已读取 ${referenceImageUrls.length} 张参考图`
         : ''
-      setToast(`已使用 ${videoModel.label} 生成 ${videoDuration} 秒·${videoResolution} 视频${referenceSummary}。`)
+      const referenceVideoSummary = referenceVideoUrls.length
+        ? `，已读取 ${referenceVideoUrls.length} 个参考视频`
+        : ''
+      setToast(`已使用 ${videoModel.label} 生成 ${videoDuration} 秒·${videoResolution} 视频${referenceSummary}${referenceVideoSummary}。`)
     } catch (error) {
       const message = error instanceof Error ? error.message : '视频生成失败'
       updateNodeData(nodeId, { status: 'error', error: message })
@@ -4716,6 +5521,12 @@ export default function App() {
     referenceInputRef.current?.click()
   }
 
+  function uploadReferenceVideoFromMenu() {
+    if (contextMenu) pendingNodePositionRef.current = contextMenu.flowPosition
+    closeContextMenu()
+    referenceVideoInputRef.current?.click()
+  }
+
   async function saveProject() {
     if (isProjectSaving || isExporting) return
 
@@ -4849,8 +5660,11 @@ export default function App() {
     }
   }
 
-  function applyImportedProject(projectValue: Partial<ProjectFile>) {
+  async function applyImportedProject(projectValue: Partial<ProjectFile>) {
     const project = normalizeImportedProject(projectValue)
+    if (project.model3DScenes && Object.keys(project.model3DScenes).length) {
+      await saveModel3DScenes(project.model3DScenes)
+    }
     setProjectName(project.projectName)
     setNodes(project.nodes)
     setEdges(project.edges)
@@ -4862,7 +5676,7 @@ export default function App() {
 
   async function importProjectText(text: string) {
     try {
-      applyImportedProject(JSON.parse(text) as Partial<ProjectFile>)
+      await applyImportedProject(JSON.parse(text) as Partial<ProjectFile>)
       return true
     } catch (error) {
       setToast(error instanceof Error && error.message === 'INVALID_PROJECT' ? '导入失败：请选择 AI 画布项目文件。' : '导入失败：文件不是有效项目。')
@@ -4880,7 +5694,7 @@ export default function App() {
         })
         const payload = (await response.json().catch(() => null)) as { project?: Partial<ProjectFile>; error?: string } | null
         if (!response.ok || !payload?.project) throw new Error(payload?.error || '项目包导入失败')
-        applyImportedProject(payload.project)
+        await applyImportedProject(payload.project)
         return true
       }
       return await importProjectText(await file.text())
@@ -4966,6 +5780,46 @@ export default function App() {
     event.target.value = ''
   }
 
+  async function addReferenceVideo(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      pendingNodePositionRef.current = null
+      return
+    }
+
+    const nodePosition = pendingNodePositionRef.current ?? { x: 120 + nodes.length * 24, y: 140 + nodes.length * 24 }
+    pendingNodePositionRef.current = null
+    try {
+      setToast('正在读取并缓存参考视频…')
+      const metadata = await validateReferenceVideoFile(file)
+      const videoUrl = await cacheReferenceVideoFile(file)
+      const node: WorkflowNode = {
+        id: id('video-ref'),
+        type: 'workflow',
+        position: nodePosition,
+        selected: true,
+        data: {
+          kind: 'video-reference',
+          title: '参考视频',
+          videoUrl,
+          videoDurationSeconds: metadata.duration,
+          status: 'done',
+          model: '上传',
+          size: apiConfig.size,
+          sourceName: file.name,
+          createdAt: new Date().toLocaleString('zh-CN'),
+        },
+      }
+      setNodes((current) => [...current.map((item) => ({ ...item, selected: false })), node])
+      setSelectedNodeId(node.id)
+      markDirty()
+      setToast(`参考视频已加入画布：${file.name}`)
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '参考视频上传失败')
+    }
+  }
+
   useEffect(() => {
     const handlePasteImage = (event: ClipboardEvent) => {
       const target = event.target instanceof HTMLElement ? event.target : null
@@ -5033,7 +5887,69 @@ export default function App() {
     showSettings,
   ])
 
-  function addModelPreviewToCanvas(result: { dataUrl: string; fileName: string; width: number; height: number }) {
+  function openNewModel3DStudio() {
+    setModel3DEditSession({ nodeId: null, sceneId: null, scene: null })
+    setShowModelStudio(true)
+  }
+
+  async function openModel3DFromNode(nodeId: string) {
+    const node = nodes.find((item) => item.id === nodeId)
+    const sceneId = node?.data.model3DSceneId
+    if (!node || !sceneId) return
+    setToast('正在打开这个参考图的 3D 场景…')
+    const scene = await readModel3DScene(sceneId)
+    if (!scene) {
+      setToast('没有找到这张参考图关联的 3D 场景，可能已清理浏览器数据。')
+      return
+    }
+    setModel3DEditSession({ nodeId, sceneId, scene })
+    setShowModelStudio(true)
+    setToast('已恢复上次编辑的模型、相机和灯光。')
+  }
+
+  function closeModel3DStudio() {
+    setShowModelStudio(false)
+    setModel3DEditSession({ nodeId: null, sceneId: null, scene: null })
+  }
+
+  async function addModelPreviewToCanvas(result: {
+    dataUrl: string
+    fileName: string
+    width: number
+    height: number
+    sceneId: string
+    scene: SavedModel3DScene
+  }) {
+    await saveModel3DScene(result.sceneId, result.scene)
+    const editedNodeId = model3DEditSession.nodeId
+    if (editedNodeId) {
+      setNodes((current) => current.map((item) => (
+        item.id === editedNodeId
+          ? {
+              ...item,
+              selected: true,
+              data: {
+                ...item.data,
+                imageUrl: result.dataUrl,
+                model3DSceneId: result.sceneId,
+                size: `${result.width}x${result.height}`,
+                sourceName: result.fileName,
+                status: 'done',
+                error: undefined,
+                createdAt: new Date().toLocaleString('zh-CN'),
+              },
+            }
+          : { ...item, selected: false }
+      )))
+      setSelectedNodeId(editedNodeId)
+      markDirty()
+      setToast(`已保存 3D 场景并更新 ${result.width} × ${result.height} 参考图。`)
+      window.setTimeout(() => {
+        void flowInstance?.fitView({ nodes: [{ id: editedNodeId }], padding: 0.32, maxZoom: 1, duration: 220 })
+      }, 0)
+      return
+    }
+
     const canvasCenter = flowInstance?.screenToFlowPosition(
       { x: window.innerWidth / 2, y: window.innerHeight / 2 },
       { snapToGrid: true, snapGrid: [24, 24] },
@@ -5049,6 +5965,7 @@ export default function App() {
         imageUrl: result.dataUrl,
         status: 'done',
         model: '3D 预览',
+        model3DSceneId: result.sceneId,
         size: `${result.width}x${result.height}`,
         sourceName: result.fileName,
         createdAt: new Date().toLocaleString('zh-CN'),
@@ -5057,9 +5974,8 @@ export default function App() {
 
     setNodes((current) => [...current.map((item) => ({ ...item, selected: false })), node])
     setSelectedNodeId(node.id)
-    setShowModelStudio(false)
     markDirty()
-    setToast(`3D 视角已作为 ${result.width} × ${result.height} 参考图加入画板。`)
+    setToast(`3D 场景已自动保存，并作为 ${result.width} × ${result.height} 参考图加入画板。`)
     window.setTimeout(() => {
       void flowInstance?.fitView({
         nodes: [{ id: node.id }],
@@ -5078,17 +5994,44 @@ export default function App() {
 
     const reader = new FileReader()
     reader.onload = () => {
+      const previousSceneId = nodes.find((node) => node.id === nodeId)?.data.model3DSceneId
       updateNodeData(nodeId, {
         imageUrl: String(reader.result),
+        model3DSceneId: undefined,
         sourceName: file.name,
         status: 'done',
         error: undefined,
         createdAt: new Date().toLocaleString('zh-CN'),
       })
+      if (previousSceneId) void deleteModel3DScene(previousSceneId)
       setToast(`已替换参考图：${file.name}`)
     }
     reader.onerror = () => setToast('替换失败，请重新选择图片。')
     reader.readAsDataURL(file)
+  }
+
+  async function replaceReferenceVideo(nodeId: string, file: File) {
+    try {
+      updateNodeData(nodeId, { status: 'generating', error: undefined })
+      setToast('正在读取并缓存参考视频…')
+      const metadata = await validateReferenceVideoFile(file)
+      const videoUrl = await cacheReferenceVideoFile(file)
+      updateNodeData(nodeId, {
+        videoUrl,
+        videoDurationSeconds: metadata.duration,
+        sourceName: file.name,
+        status: 'done',
+        error: undefined,
+        createdAt: new Date().toLocaleString('zh-CN'),
+      })
+      setToast(`已上传参考视频：${file.name}`)
+    } catch (error) {
+      updateNodeData(nodeId, {
+        status: 'error',
+        error: error instanceof Error ? error.message : '参考视频上传失败',
+      })
+      setToast(error instanceof Error ? error.message : '参考视频上传失败')
+    }
   }
 
   function updateApiConfig(patch: Partial<ApiConfig>) {
@@ -5261,6 +6204,13 @@ export default function App() {
             onChange={importProject}
           />
           <input ref={referenceInputRef} type="file" accept="image/*" hidden onChange={addReferenceImage} />
+          <input
+            ref={referenceVideoInputRef}
+            type="file"
+            accept="video/mp4,video/quicktime,.mp4,.mov"
+            hidden
+            onChange={(event) => void addReferenceVideo(event)}
+          />
         </div>
 
         <div className="save-state">{dirty ? '未保存' : '已保存'}</div>
@@ -5367,6 +6317,10 @@ export default function App() {
               <button type="button" onClick={uploadReferenceFromMenu}>
                 <UploadCloud size={15} />
                 上传图像
+              </button>
+              <button type="button" onClick={uploadReferenceVideoFromMenu}>
+                <Video size={15} />
+                上传参考视频
               </button>
               <button type="button" onClick={addPromptInputFromMenu}>
                 <Wand2 size={15} />
@@ -5530,7 +6484,7 @@ export default function App() {
               onClick={() => {
                 setShowQuickWorkflows(false)
                 setShowPromptLibrary(false)
-                setShowModelStudio(true)
+                openNewModel3DStudio()
               }}
               title="打开 3D 模型预览"
               aria-label="打开 3D 模型预览"
@@ -5782,7 +6736,9 @@ export default function App() {
           )}
         >
           <Model3DStudio
-            onClose={() => setShowModelStudio(false)}
+            onClose={closeModel3DStudio}
+            initialScene={model3DEditSession.scene}
+            sceneId={model3DEditSession.sceneId}
             onExport={addModelPreviewToCanvas}
           />
         </Suspense>
