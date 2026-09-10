@@ -214,12 +214,15 @@ type GenerationRecord = {
   model: string
   size: string
   createdAt: string
+  mediaType?: 'image' | 'video'
   imageUrl?: string
+  videoUrl?: string
   status: '成功' | '失败'
 }
 
-type HistoryImagePreview = Pick<GenerationRecord, 'prompt' | 'createdAt'> & {
-  imageUrl: string
+type HistoryMediaPreview = Pick<GenerationRecord, 'prompt' | 'createdAt'> & {
+  mediaType: 'image' | 'video'
+  mediaUrl: string
 }
 
 type ImageInputSlot = {
@@ -716,6 +719,20 @@ const apiMartModels: ApiMartModelOption[] = [
   {
     id: 'gpt-image-2',
     label: 'GPT Image 2',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+  },
+  {
+    id: 'gpt-image-2.5-flare',
+    label: 'GPT Image 2.5 Flare',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+  },
+  {
+    id: 'gpt-image-2.5-sunburst',
+    label: 'GPT Image 2.5 Sunburst',
     resolutions: ['1K', '2K', '4K'],
     defaultResolution: '1K',
     maxReferenceImages: 16,
@@ -1352,12 +1369,16 @@ async function buildPackageProject(
     })
   }
 
-  const historyWithImages: GenerationRecord[] = []
+  const historyWithMedia: GenerationRecord[] = []
   for (const item of history) {
-    const nodeImageUrl = nodes.find((node) => node.id === item.id)?.data.imageUrl
-    historyWithImages.push({
+    const sourceNode = nodes.find((node) => node.id === item.id)
+    const nodeImageUrl = sourceNode?.data.imageUrl
+    const nodeVideoUrl = sourceNode?.data.videoUrl
+    const isVideoHistory = item.mediaType === 'video' || Boolean(item.videoUrl)
+    historyWithMedia.push({
       ...item,
-      imageUrl: await cacheImage(item.imageUrl || nodeImageUrl),
+      imageUrl: await cacheImage(item.imageUrl || (!isVideoHistory && item.status === '成功' ? nodeImageUrl : undefined)),
+      videoUrl: await cacheVideo(item.videoUrl || (isVideoHistory && item.status === '成功' ? nodeVideoUrl : undefined)),
     })
   }
 
@@ -1405,7 +1426,7 @@ async function buildPackageProject(
     projectName,
     nodes: cleanNodes,
     edges: edges.map(cleanEdge),
-    history: historyWithImages,
+    history: historyWithMedia,
     model3DScenes,
   } satisfies ProjectFile
 }
@@ -1474,6 +1495,21 @@ function downloadImage(url: string, filename: string) {
   link.download = filename
   link.target = '_blank'
   link.click()
+}
+
+async function downloadMediaFile(mediaUrl: string, filename: string) {
+  const response = await fetch('/api/media/download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mediaUrl }),
+  })
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(payload?.error || '视频下载失败')
+  }
+  const downloadUrl = URL.createObjectURL(await response.blob())
+  downloadImage(downloadUrl, filename)
+  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000)
 }
 
 function imageBaseName(projectName: string, nodeId: string) {
@@ -3347,7 +3383,7 @@ export default function App() {
     scene: SavedModel3DScene | null
   }>({ nodeId: null, sceneId: null, scene: null })
   const [showHistoryPanel, setShowHistoryPanel] = useState(false)
-  const [historyImagePreview, setHistoryImagePreview] = useState<HistoryImagePreview | null>(null)
+  const [historyMediaPreview, setHistoryMediaPreview] = useState<HistoryMediaPreview | null>(null)
   const [historyImageNaturalSize, setHistoryImageNaturalSize] = useState<{ width: number; height: number } | null>(null)
   const [lightDirectionNodeId, setLightDirectionNodeId] = useState<string | null>(null)
   const [showQuickWorkflows, setShowQuickWorkflows] = useState(false)
@@ -3703,7 +3739,7 @@ export default function App() {
 
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || showModelStudio || groupDialog || historyImagePreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || showModelStudio || groupDialog || historyMediaPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -3712,7 +3748,7 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, groupDialog, historyImagePreview, lightDirectionNodeId, nodes, selectedNodeId, showModelStudio, showSettings],
+    [deleteNodesByIds, groupDialog, historyMediaPreview, lightDirectionNodeId, nodes, selectedNodeId, showModelStudio, showSettings],
   )
 
   useEffect(() => {
@@ -3721,15 +3757,15 @@ export default function App() {
   }, [handleDeleteKey])
 
   useEffect(() => {
-    if (!historyImagePreview) return
+    if (!historyMediaPreview) return
 
     const handlePreviewEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setHistoryImagePreview(null)
+      if (event.key === 'Escape') setHistoryMediaPreview(null)
     }
 
     window.addEventListener('keydown', handlePreviewEscape, true)
     return () => window.removeEventListener('keydown', handlePreviewEscape, true)
-  }, [historyImagePreview])
+  }, [historyMediaPreview])
 
   useEffect(() => {
     if (!lightDirectionNodeId) return
@@ -3791,6 +3827,31 @@ export default function App() {
       }
     },
     [nodes, projectName],
+  )
+
+  const downloadHistoryMedia = useCallback(
+    async (item: GenerationRecord) => {
+      const sourceNode = nodes.find((node) => node.id === item.id)
+      const videoUrl = item.videoUrl || (item.status === '成功' ? sourceNode?.data.videoUrl : undefined)
+      const isVideoHistory = item.mediaType === 'video' || Boolean(item.videoUrl)
+      if (!isVideoHistory) {
+        await revealHistoryImage(item)
+        return
+      }
+      if (!videoUrl) {
+        setToast('这条历史记录没有可下载的视频。')
+        return
+      }
+
+      try {
+        await downloadMediaFile(videoUrl, `${imageBaseName(projectName, item.id)}.mp4`)
+        setToast('视频已下载到浏览器下载目录。')
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '视频下载失败'
+        setToast(message)
+      }
+    },
+    [nodes, projectName, revealHistoryImage],
   )
 
   const useNodePrompt = useCallback((value: string) => {
@@ -4942,6 +5003,7 @@ export default function App() {
       videoResolution,
       videoDuration,
     }
+    const createdAt = new Date().toLocaleString('zh-CN')
 
     setIsGenerating(true)
     updateNodeData(nodeId, {
@@ -4968,6 +5030,19 @@ export default function App() {
         videoResolution,
         videoDuration,
       })
+      setHistory((current) => [
+        {
+          id: nodeId,
+          prompt: trimmed,
+          model: videoModel.id,
+          size: outputSize,
+          createdAt,
+          mediaType: 'video',
+          videoUrl,
+          status: '成功',
+        },
+        ...current,
+      ])
       const referenceSummary = referenceImageUrls.length
         ? `，已读取 ${referenceImageUrls.length} 张参考图`
         : ''
@@ -4978,6 +5053,18 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : '视频生成失败'
       updateNodeData(nodeId, { status: 'error', error: message })
+      setHistory((current) => [
+        {
+          id: nodeId,
+          prompt: trimmed,
+          model: videoModel.id,
+          size: outputSize,
+          createdAt,
+          mediaType: 'video',
+          status: '失败',
+        },
+        ...current,
+      ])
       setToast(message)
     } finally {
       setIsGenerating(false)
@@ -5824,7 +5911,7 @@ export default function App() {
     const handlePasteImage = (event: ClipboardEvent) => {
       const target = event.target instanceof HTMLElement ? event.target : null
       if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
-      if (showSettings || showModelStudio || showHistoryPanel || historyImagePreview || groupDialog) return
+      if (showSettings || showModelStudio || showHistoryPanel || historyMediaPreview || groupDialog) return
 
       const clipboardData = event.clipboardData
       const itemFile = Array.from(clipboardData?.items || [])
@@ -5878,7 +5965,7 @@ export default function App() {
     apiConfig.size,
     flowInstance,
     groupDialog,
-    historyImagePreview,
+    historyMediaPreview,
     markDirty,
     nodes.length,
     setNodes,
@@ -6512,40 +6599,66 @@ export default function App() {
                 {history.length ? (
                   <div className="history-grid">
                     {history.slice(0, 12).map((item, index) => {
-                      const imageUrl = item.imageUrl || nodes.find((node) => node.id === item.id)?.data.imageUrl
+                      const sourceNode = nodes.find((node) => node.id === item.id)
+                      const isVideoHistory = item.mediaType === 'video' || Boolean(item.videoUrl)
+                      const imageUrl = item.imageUrl || (!isVideoHistory && item.status === '成功' ? sourceNode?.data.imageUrl : undefined)
+                      const videoUrl = item.videoUrl || (isVideoHistory && item.status === '成功' ? sourceNode?.data.videoUrl : undefined)
+                      const mediaUrl = isVideoHistory ? videoUrl : imageUrl
+                      const openMediaPreview = () => {
+                        if (!mediaUrl) return
+                        setHistoryImageNaturalSize(null)
+                        setHistoryMediaPreview({
+                          mediaType: isVideoHistory ? 'video' : 'image',
+                          mediaUrl,
+                          prompt: item.prompt,
+                          createdAt: item.createdAt,
+                        })
+                      }
                       return (
                         <div className="history-card" key={`${item.id}-${item.createdAt}-${index}`}>
                           <div className="history-thumb-wrap">
-                            <button className="history-thumb" type="button" onClick={() => setPrompt(item.prompt)} title="使用这条提示词">
-                              {imageUrl ? <img src={imageUrl} alt="生成历史缩略图" /> : <ImageIcon size={22} />}
+                            <button
+                              className="history-thumb"
+                              type="button"
+                              onClick={() => isVideoHistory && mediaUrl ? openMediaPreview() : setPrompt(item.prompt)}
+                              title={isVideoHistory && mediaUrl ? '播放视频' : '使用这条提示词'}
+                            >
+                              {videoUrl ? (
+                                <video src={videoUrl} aria-label="生成历史视频缩略图" muted playsInline preload="metadata" />
+                              ) : imageUrl ? (
+                                <img src={imageUrl} alt="生成历史缩略图" />
+                              ) : isVideoHistory ? (
+                                <Video size={22} />
+                              ) : (
+                                <ImageIcon size={22} />
+                              )}
                             </button>
-                            {imageUrl && (
+                            {mediaUrl && (
                               <button
                                 className="history-preview-button"
                                 type="button"
-                                onClick={() => {
-                                  setHistoryImageNaturalSize(null)
-                                  setHistoryImagePreview({ imageUrl, prompt: item.prompt, createdAt: item.createdAt })
-                                }}
-                                title="查看大图"
-                                aria-label="查看生成历史大图"
+                                onClick={openMediaPreview}
+                                title={isVideoHistory ? '播放视频' : '查看大图'}
+                                aria-label={isVideoHistory ? '播放生成历史视频' : '查看生成历史大图'}
                               >
                                 <Eye size={17} />
                               </button>
                             )}
                           </div>
                           <div className="history-meta">
-                            <span>{item.status}</span>
+                            <span className={item.status === '成功' ? 'success' : 'failed'}>
+                              {isVideoHistory ? '视频' : '图像'} · {item.status}
+                            </span>
                             <strong>{item.prompt}</strong>
                             <small>{item.createdAt}</small>
                           </div>
                           <button
                             className="history-folder"
                             type="button"
-                            onClick={() => void revealHistoryImage(item)}
-                            title="下载图像"
-                            aria-label="下载生成历史图像"
-                            disabled={!imageUrl}
+                            onClick={() => void downloadHistoryMedia(item)}
+                            title={isVideoHistory ? '下载视频' : '下载图像'}
+                            aria-label={isVideoHistory ? '下载生成历史视频' : '下载生成历史图像'}
+                            disabled={!mediaUrl}
                           >
                             <Download size={15} />
                           </button>
@@ -6559,18 +6672,20 @@ export default function App() {
               </div>
             )}
           </div>
-          {historyImagePreview && (
+          {historyMediaPreview && (
             <div
               className="history-image-backdrop"
               role="presentation"
               onMouseDown={(event) => {
-                if (event.target === event.currentTarget) setHistoryImagePreview(null)
+                if (event.target === event.currentTarget) setHistoryMediaPreview(null)
               }}
               onContextMenu={(event) => event.stopPropagation()}
             >
               <section
                 className={`history-image-modal ${
-                  historyImageNaturalSize
+                  historyMediaPreview.mediaType === 'video'
+                    ? 'is-video'
+                    : historyImageNaturalSize
                     ? historyImageNaturalSize.width > historyImageNaturalSize.height
                       ? 'is-landscape'
                       : historyImageNaturalSize.width < historyImageNaturalSize.height
@@ -6580,32 +6695,36 @@ export default function App() {
                 }`}
                 role="dialog"
                 aria-modal="true"
-                aria-label="生成历史大图预览"
+                aria-label={historyMediaPreview.mediaType === 'video' ? '生成历史视频预览' : '生成历史大图预览'}
                 onMouseDown={(event) => event.stopPropagation()}
               >
                 <div className="history-image-head">
                   <div>
-                    <strong>生成历史</strong>
-                    <small>{historyImagePreview.createdAt}</small>
+                    <strong>{historyMediaPreview.mediaType === 'video' ? '视频生成历史' : '图像生成历史'}</strong>
+                    <small>{historyMediaPreview.createdAt}</small>
                   </div>
-                  <button type="button" onClick={() => setHistoryImagePreview(null)} title="关闭" aria-label="关闭大图预览">
+                  <button type="button" onClick={() => setHistoryMediaPreview(null)} title="关闭" aria-label="关闭历史预览">
                     <X size={18} />
                   </button>
                 </div>
                 <div className="history-image-stage">
-                  <img
-                    src={historyImagePreview.imageUrl}
-                    alt="生成历史大图"
-                    onLoad={(event) => {
-                      const { naturalWidth, naturalHeight } = event.currentTarget
-                      if (naturalWidth > 0 && naturalHeight > 0) {
-                        setHistoryImageNaturalSize({ width: naturalWidth, height: naturalHeight })
-                      }
-                    }}
-                  />
+                  {historyMediaPreview.mediaType === 'video' ? (
+                    <video src={historyMediaPreview.mediaUrl} controls playsInline preload="metadata" />
+                  ) : (
+                    <img
+                      src={historyMediaPreview.mediaUrl}
+                      alt="生成历史大图"
+                      onLoad={(event) => {
+                        const { naturalWidth, naturalHeight } = event.currentTarget
+                        if (naturalWidth > 0 && naturalHeight > 0) {
+                          setHistoryImageNaturalSize({ width: naturalWidth, height: naturalHeight })
+                        }
+                      }}
+                    />
+                  )}
                 </div>
-                <div className="history-image-caption" title={historyImagePreview.prompt}>
-                  {historyImagePreview.prompt}
+                <div className="history-image-caption" title={historyMediaPreview.prompt}>
+                  {historyMediaPreview.prompt}
                 </div>
               </section>
             </div>

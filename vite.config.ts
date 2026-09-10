@@ -634,6 +634,12 @@ async function transformProjectVideoValues(
     const value = nodeValue.data.videoUrl
     if (typeof value === 'string' && value) nodeValue.data.videoUrl = await transform(value)
   }
+
+  for (const historyValue of Array.isArray(project.history) ? project.history : []) {
+    if (!isJsonRecord(historyValue)) continue
+    const value = historyValue.videoUrl
+    if (typeof value === 'string' && value) historyValue.videoUrl = await transform(value)
+  }
 }
 
 async function transformProjectModelValues(
@@ -1478,7 +1484,14 @@ async function requestChange2ProModelList(apiKey: string) {
 
 const apiMartModelConfigs: Record<
   string,
-  { label: string; resolutions: ImageResolutionTier[]; defaultResolution: ImageResolutionTier; maxReferenceImages: number }
+  {
+    label: string
+    resolutions: ImageResolutionTier[]
+    defaultResolution: ImageResolutionTier
+    maxReferenceImages: number
+    requiresPublicReferenceUrls?: boolean
+    defaultQuality?: 'medium'
+  }
 > = {
   'gemini-3-pro-image-preview': {
     label: 'Nano Banana Pro',
@@ -1497,6 +1510,22 @@ const apiMartModelConfigs: Record<
     resolutions: ['1K', '2K', '4K'],
     defaultResolution: '1K',
     maxReferenceImages: 16,
+  },
+  'gpt-image-2.5-flare': {
+    label: 'GPT Image 2.5 Flare',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+    requiresPublicReferenceUrls: true,
+    defaultQuality: 'medium',
+  },
+  'gpt-image-2.5-sunburst': {
+    label: 'GPT Image 2.5 Sunburst',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+    requiresPublicReferenceUrls: true,
+    defaultQuality: 'medium',
   },
   'seedream-5-0-pro': {
     label: 'Seedream 5.0 Pro',
@@ -1681,7 +1710,7 @@ function apiMartResolution(model: string, requested?: ImageResolutionTier) {
   const resolution = requested && modelConfig.resolutions.includes(requested)
     ? requested
     : modelConfig.defaultResolution
-  return model === 'gpt-image-2' ? resolution.toLowerCase() : resolution
+  return model.startsWith('gpt-image-') ? resolution.toLowerCase() : resolution
 }
 
 async function requestApiMartImage(config: ApiConfig, prompt: string, referenceImageUrls: string[]) {
@@ -1689,7 +1718,18 @@ async function requestApiMartImage(config: ApiConfig, prompt: string, referenceI
   const modelConfig = apiMartModelConfigs[config.model]
   if (!modelConfig) throw new UpstreamHttpError('当前 API Mart 模型不在网站内置的可选列表中。', 400)
 
-  const preparedImages = await prepareGrsAiReferenceImages(referenceImageUrls, modelConfig.maxReferenceImages)
+  if (referenceImageUrls.length > modelConfig.maxReferenceImages) {
+    throw new UpstreamHttpError(`${modelConfig.label} 最多支持 ${modelConfig.maxReferenceImages} 张参考图。`, 400)
+  }
+  // GPT Image 2.5 only accepts public HTTP(S) references, unlike GPT Image 2's base64 support.
+  const preparedImages: string[] = []
+  if (modelConfig.requiresPublicReferenceUrls) {
+    for (const [index, imageUrl] of referenceImageUrls.entries()) {
+      preparedImages.push(await uploadApiMartReferenceImage(config.endpoint.trim(), config.apiKey.trim(), imageUrl, index, false))
+    }
+  } else {
+    preparedImages.push(...await prepareGrsAiReferenceImages(referenceImageUrls, modelConfig.maxReferenceImages))
+  }
   const payload: Record<string, unknown> = {
     model: config.model,
     prompt,
@@ -1697,6 +1737,7 @@ async function requestApiMartImage(config: ApiConfig, prompt: string, referenceI
     resolution: apiMartResolution(config.model, config.imageSize),
     n: 1,
   }
+  if (modelConfig.defaultQuality) payload.quality = modelConfig.defaultQuality
   if (preparedImages.length) payload.image_urls = preparedImages
 
   const headers = { Authorization: `Bearer ${config.apiKey.trim()}` }
@@ -1742,10 +1783,14 @@ async function uploadApiMartReferenceImage(
   apiKey: string,
   imageUrl: string,
   index: number,
+  allowAssetUrl = true,
 ) {
   const normalizedImageUrl = imageUrl.trim()
   const isApiMartAssetUrl = /^asset:\/\//i.test(normalizedImageUrl)
   const isPublicHttpUrl = /^https?:\/\//i.test(normalizedImageUrl) && !shouldInlineGrsAiReference(normalizedImageUrl)
+  if (isApiMartAssetUrl && !allowAssetUrl) {
+    throw new UpstreamHttpError(`参考图 ${index + 1} 为私有素材地址，此图像模型仅支持公网图片网址，请重新上传原图。`, 400)
+  }
   if (isApiMartAssetUrl || isPublicHttpUrl) return normalizedImageUrl
 
   const image = await loadImageBuffer(normalizedImageUrl)
@@ -1777,6 +1822,9 @@ async function uploadApiMartReferenceImage(
   if (!json || typeof json !== 'object') throw new Error(`API Mart 未返回参考图 ${index + 1} 的上传地址。`)
   const uploadedUrl = stringValue(json as Record<string, unknown>, ['url', 'image_url', 'imageUrl'])
   if (!uploadedUrl) throw new Error(`API Mart 未返回参考图 ${index + 1} 的上传地址。`)
+  if (!allowAssetUrl && (!/^https?:\/\//i.test(uploadedUrl) || shouldInlineGrsAiReference(uploadedUrl))) {
+    throw new Error(`API Mart 未返回参考图 ${index + 1} 的公网 HTTP(S) 网址，请重新上传图片。`)
+  }
   return uploadedUrl
 }
 
@@ -2210,6 +2258,29 @@ function localImageLibraryPlugin(): Plugin {
           if (filePath) await unlink(filePath).catch(() => undefined)
           const statusCode = error instanceof UpstreamHttpError ? error.statusCode : 500
           sendJson(res, statusCode, { error: error instanceof Error ? error.message : '参考视频缓存失败' })
+        }
+      })
+
+      server.middlewares.use('/api/media/download', async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') {
+          next()
+          return
+        }
+
+        try {
+          const body = JSON.parse(await readBody(req)) as { mediaUrl?: string }
+          if (!body.mediaUrl) throw new Error('缺少媒体地址')
+
+          const media = await loadMediaBuffer(body.mediaUrl)
+          if (media.buffer.byteLength > 200 * 1024 * 1024) throw new Error('单个下载视频不能超过 200 MB')
+
+          res.statusCode = 200
+          res.setHeader('Content-Type', media.mediaType || 'application/octet-stream')
+          res.setHeader('Content-Length', String(media.buffer.byteLength))
+          res.setHeader('Cache-Control', 'private, no-store')
+          res.end(media.buffer)
+        } catch (error) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : '视频下载失败' })
         }
       })
 

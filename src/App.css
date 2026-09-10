@@ -2766,7 +2766,8 @@
   padding: 0;
 }
 
-.history-thumb img {
+.history-thumb img,
+.history-thumb video {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -2814,8 +2815,15 @@
 }
 
 .history-meta span {
-  color: var(--success);
   font-size: 11px;
+}
+
+.history-meta span.success {
+  color: var(--success);
+}
+
+.history-meta span.failed {
+  color: #f2a6a6;
 }
 
 .history-meta strong {
@@ -2908,6 +2916,11 @@
   height: min(920px, calc(100% - 32px));
 }
 
+.history-image-modal.is-video {
+  width: min(1180px, calc(100% - 32px));
+  height: min(820px, calc(100% - 32px));
+}
+
 .history-image-head {
   display: flex;
   min-height: 54px;
@@ -2975,6 +2988,17 @@
   object-fit: contain;
   object-position: center;
   box-shadow: 0 12px 38px rgba(0, 0, 0, 0.3);
+}
+
+.history-image-stage video {
+  display: block;
+  width: calc(100% - 40px);
+  height: calc(100% - 40px);
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 6px;
+  background: #020305;
+  object-fit: contain;
 }
 
 .history-image-caption {
