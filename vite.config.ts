@@ -87,7 +87,9 @@ function configuredProxyUrl() {
 function shouldUseUpstreamProxy(endpoint: string) {
   try {
     const hostname = new URL(endpoint).hostname.toLowerCase()
-    return hostname === 'apimart.ai' || hostname.endsWith('.apimart.ai')
+    return ['apimart.ai', 'change2pro.com'].some(
+      (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
+    )
   } catch {
     return false
   }
@@ -615,6 +617,12 @@ async function transformProjectImageValues(
     for (const key of ['imageUrl', 'sourceImageUrl', 'maskUrl']) {
       const value = nodeValue.data[key]
       if (typeof value === 'string' && value) nodeValue.data[key] = await transform(value)
+    }
+    const sketch = nodeValue.data.sketch
+    if (isJsonRecord(sketch) && Array.isArray(sketch.layers)) {
+      for (const layer of sketch.layers) {
+        if (isJsonRecord(layer) && typeof layer.imageUrl === 'string' && layer.imageUrl) layer.imageUrl = await transform(layer.imageUrl)
+      }
     }
   }
 
@@ -1455,12 +1463,12 @@ async function requestChange2ProModelList(apiKey: string) {
 
   let response: Response
   try {
-    response = await fetch(await validateUpstreamEndpoint(change2ProModelsEndpoint), {
+    response = await fetchUpstream(change2ProModelsEndpoint, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey.trim()}` },
     })
   } catch (error) {
-    throw new Error(formatUpstreamFetchError(error, change2ProModelsEndpoint))
+    throw new Error(formatUpstreamFetchError(error, change2ProModelsEndpoint, '模型列表'))
   }
 
   const text = await response.text()
@@ -2035,7 +2043,7 @@ async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string;
 
   let response: Response
   try {
-    response = await fetch(await validateUpstreamEndpoint(endpoint), {
+    response = await fetchUpstream(endpoint, {
       method: 'POST',
       headers,
       body: requestBody,

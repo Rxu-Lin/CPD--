@@ -1,0 +1,70 @@
+.element-edit-backdrop { position: fixed; inset: 0; z-index: 110; display: grid; place-items: center; padding: 22px; background: rgba(2,6,10,.82); backdrop-filter: blur(8px); }
+.element-edit-studio { width: min(1640px, 100%); height: min(1040px, calc(100dvh - 44px)); min-height: 620px; display: grid; grid-template-rows: 62px minmax(0,1fr) 64px; overflow: hidden; border: 1px solid #303b46; border-radius: 14px; background: #0d141c; color: #e8eff5; box-shadow: 0 32px 110px #0009; font-size: 12px; }
+.element-edit-studio button { border: 1px solid #303b46; border-radius: 8px; background: #18222c; color: #dce7ef; cursor: pointer; font: inherit; }
+.element-edit-studio button:hover:not(:disabled) { border-color: #607485; background: #22303c; color: #fff; }
+.element-edit-studio button:disabled { cursor: not-allowed; opacity: .42; }
+.element-edit-head, .element-edit-foot { display: flex; align-items: center; justify-content: space-between; border-color: #27333e; background: #111a23; padding: 0 18px; }
+.element-edit-head { border-bottom: 1px solid #27333e; }
+.element-edit-head > div, .element-edit-head > div > span { display: flex; align-items: center; gap: 10px; }
+.element-edit-head > div > span { align-items: flex-start; flex-direction: column; gap: 2px; }
+.element-edit-head strong { font-size: 15px; }
+.element-edit-head small { color: #7f909e; font-size: 10px; }
+.element-edit-head > button { width: 34px; height: 34px; display: grid; place-items: center; background: transparent; }
+.element-edit-body { display: grid; min-width: 0; min-height: 0; grid-template-columns: 84px minmax(0,1fr) 340px; }
+.element-edit-tools { display: flex; min-height: 0; flex-direction: column; align-items: stretch; gap: 7px; border-right: 1px solid #27333e; background: #101821; padding: 12px 9px; }
+.element-edit-tools button { min-height: 54px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border-color: transparent; background: transparent; color: #94a5b3; font-size: 9px; }
+.element-edit-tools button.active { border-color: rgba(34,211,238,.42); background: rgba(34,211,238,.1); color: #bdf4fb; }
+.element-edit-tools i { height: 1px; margin: 4px 2px; background: #293640; }
+.element-edit-workspace { display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(0,1fr) 46px; background: #080d12; }
+.element-edit-stage { min-width: 0; min-height: 0; overflow: auto; display: grid; align-items: center; justify-items: center; padding: 28px; background-color: #0a1016; background-image: linear-gradient(45deg,#121a22 25%,transparent 25%),linear-gradient(-45deg,#121a22 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#121a22 75%),linear-gradient(-45deg,transparent 75%,#121a22 75%); background-position: 0 0,0 10px,10px -10px,-10px 0; background-size: 20px 20px; }
+.element-edit-zoom-content { min-width: 50%; max-width: 300%; transition: width .15s ease; }
+.element-edit-image-wrap { position: relative; width: 100%; overflow: hidden; border: 1px solid #33434f; border-radius: 8px; background: #101820; box-shadow: 0 18px 50px #0008; }
+.element-edit-image-wrap > img, .element-edit-mask { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.element-edit-image-wrap > img { object-fit: fill; user-select: none; }
+.element-edit-mask { z-index: 2; opacity: .5; touch-action: none; cursor: crosshair; }
+.element-edit-mask.mark { cursor: cell; }
+.element-edit-mask.erase { cursor: not-allowed; }
+.element-edit-marker-layer { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
+.element-edit-marker-radius { position: absolute; border: 1px dashed rgba(34,211,238,.76); border-radius: 999px; background: rgba(34,211,238,.11); box-shadow: 0 0 0 1px rgba(4,12,18,.36) inset; pointer-events: none; }
+.element-edit-marker-layer.active .element-edit-marker-radius { border-color: #a5f3fc; background: rgba(34,211,238,.18); box-shadow: 0 0 22px rgba(34,211,238,.2); }
+.element-edit-studio .element-edit-marker-pin { position: absolute; width: 30px; min-width: 30px; height: 30px; transform: translate(-50%,-50%); display: grid; place-items: center; border: 2px solid #dffbff; border-radius: 50% 50% 50% 8px; background: #0891b2; color: #fff; box-shadow: 0 4px 13px #0008; font-size: 11px; font-weight: 800; pointer-events: auto; touch-action: none; cursor: grab; }
+.element-edit-studio .element-edit-marker-pin:active { cursor: grabbing; }
+.element-edit-marker-layer.active .element-edit-marker-pin { border-color: #fff; background: #06b6d4; box-shadow: 0 0 0 4px rgba(34,211,238,.18),0 5px 16px #0009; }
+.element-edit-box-preview { position: absolute; z-index: 3; border: 2px solid #67e8f9; background: rgba(34,211,238,.2); box-shadow: 0 0 0 9999px rgba(2,6,10,.18); pointer-events: none; }
+.element-edit-loading { position: absolute; z-index: 4; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; background: #0d151ddd; color: #b8c7d4; }
+.element-edit-loading svg, .element-edit-foot .primary svg { animation: element-edit-spin .8s linear infinite; }
+.element-edit-zoom-bar { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #25313b; color: #778896; padding: 0 14px; font-size: 10px; }
+.element-edit-zoom-bar > div { display: flex; gap: 4px; }
+.element-edit-zoom-bar button { min-width: 34px; height: 30px; display: grid; place-items: center; padding: 0 8px; }
+.element-edit-inspector { min-width: 0; min-height: 0; overflow-y: auto; border-left: 1px solid #27333e; background: #111a23; }
+.element-edit-inspector section { display: grid; gap: 12px; border-bottom: 1px solid #27333e; padding: 16px; }
+.element-edit-section-title { display: flex; align-items: center; justify-content: space-between; }
+.element-edit-section-title strong { font-size: 12px; }
+.element-edit-section-title span { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; background: rgba(34,211,238,.09); color: #8de8f4; padding: 4px 7px; font-size: 9px; }
+.element-edit-inspector p { margin: 0; color: #778997; font-size: 10px; line-height: 1.55; }
+.element-edit-inspector label { display: grid; gap: 7px; color: #a8b6c1; }
+.element-edit-inspector label > em { justify-self: end; margin-top: -22px; color: #dce7ee; font-style: normal; font-variant-numeric: tabular-nums; }
+.element-edit-marker-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.element-edit-marker-list > div { display: flex; border: 1px solid #2b3944; border-radius: 7px; overflow: hidden; background: #0d151d; }
+.element-edit-marker-list > div.active { border-color: rgba(34,211,238,.62); box-shadow: 0 0 0 2px rgba(34,211,238,.08); }
+.element-edit-marker-list button { min-width: 0; display: inline-flex; align-items: center; gap: 4px; border: 0; border-radius: 0; background: transparent; padding: 7px 8px; color: #9dabb6; }
+.element-edit-marker-list button:first-child { min-width: 76px; }
+.element-edit-marker-list button:last-child { border-left: 1px solid #293640; padding-inline: 7px; color: #70818e; }
+.element-edit-marker-list > div.active button:first-child { color: #a7f3fb; }
+.element-edit-empty-markers { display: flex; align-items: center; gap: 7px; border: 1px dashed #33434f; border-radius: 8px; background: #0d151c; color: #718492; padding: 10px; font-size: 10px; }
+.element-edit-marker-editor { display: grid; gap: 12px; border-top: 1px solid #27333e; padding-top: 12px; }
+.element-edit-marker-editor .element-edit-prompt textarea { min-height: 86px; }
+.element-edit-prompt textarea { min-height: 132px; resize: vertical; border: 1px solid #33414c; border-radius: 8px; outline: 0; background: #0a1118; color: #edf3f7; padding: 10px; font: inherit; line-height: 1.55; }
+.element-edit-prompt textarea:focus { border-color: rgba(34,211,238,.55); box-shadow: 0 0 0 3px rgba(34,211,238,.07); }
+.element-edit-output-info { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.element-edit-output-info span { display: grid; gap: 4px; border: 1px solid #2c3944; border-radius: 7px; background: #0d151c; color: #718290; padding: 8px; font-size: 9px; }
+.element-edit-output-info strong { overflow: hidden; color: #d5e0e8; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.element-edit-error { margin: 14px; border: 1px solid rgba(248,113,113,.28); border-radius: 8px; background: rgba(127,29,29,.18); color: #ffc3c3; padding: 10px; font-size: 10px; line-height: 1.5; }
+.element-edit-foot { border-top: 1px solid #27333e; }
+.element-edit-foot > span { color: #71818e; font-size: 10px; }
+.element-edit-foot > div { display: flex; gap: 8px; }
+.element-edit-foot button { min-width: 88px; height: 36px; padding: 0 13px; }
+.element-edit-foot .primary { min-width: 136px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-color: #cfe6ed; background: #eaf5f7; color: #10202a; font-weight: 750; }
+.element-edit-foot .primary:hover:not(:disabled) { background: #fff; color: #08141c; }
+@keyframes element-edit-spin { to { transform: rotate(360deg); } }
+@media (max-width: 900px) { .element-edit-backdrop { padding: 8px; } .element-edit-studio { height: calc(100dvh - 16px); } .element-edit-body { grid-template-columns: 72px minmax(0,1fr); } .element-edit-inspector { grid-column: 1 / -1; max-height: 280px; border-top: 1px solid #27333e; border-left: 0; } }

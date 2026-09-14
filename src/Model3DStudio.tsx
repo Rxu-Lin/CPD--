@@ -23,6 +23,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import UnifiedRange from './UnifiedRange'
+import { deleteModel3DDraft, model3DStorageErrorMessage, readModel3DDraft, saveModel3DDraft } from './model3dSceneStore'
 import type {
   ParametricBoxSettings,
   ParametricPrimitiveSettings,
@@ -93,6 +94,9 @@ type Model3DStudioProps = {
   onClose: () => void
   initialScene?: SavedModel3DScene | null
   sceneId?: string | null
+  transparentExport?: boolean
+  exportViewport?: { width: number; height: number }
+  useSavedScene?: boolean
   onExport: (result: {
     dataUrl: string
     fileName: string
@@ -169,7 +173,6 @@ const unlitPreviewHemisphereIntensity = 1.3
 const defaultKeyLightIntensity = 4.2
 const defaultRimLightIntensity = 1.15
 const maximumModelFileSize = 100 * 1024 * 1024
-const model3DSceneStorageKey = 'cpd-model3d-scene-v1'
 
 function setDirectionalLightPosition(
   light: THREE.DirectionalLight,
@@ -291,17 +294,6 @@ function buildOpenBoxGeometry(
   addBoxPanel(group, [thickness, wallHeight, Math.max(thickness, width - thickness * 2)], [-(length - thickness) / 2, wallCenterY, 0], material)
 }
 
-function readSavedModel3DScene(): SavedModel3DScene | null {
-  try {
-    const source = window.localStorage.getItem(model3DSceneStorageKey)
-    if (!source) return null
-    const parsed = JSON.parse(source) as SavedModel3DScene
-    return (parsed?.version === 1 || parsed?.version === 2) && Array.isArray(parsed.items) ? parsed : null
-  } catch {
-    return null
-  }
-}
-
 function savedTransformFromObject(object: THREE.Object3D): SavedTransform {
   return {
     position: [object.position.x, object.position.y, object.position.z],
@@ -345,7 +337,7 @@ function sceneSnapshotSignature(snapshot: SceneHistorySnapshot) {
   })
 }
 
-export default function Model3DStudio({ onClose, onExport, initialScene = null, sceneId = null }: Model3DStudioProps) {
+export default function Model3DStudio({ onClose, onExport, initialScene = null, sceneId = null, transparentExport = false, exportViewport, useSavedScene = true }: Model3DStudioProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const viewportHostRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<PreviewRuntime | null>(null)
@@ -370,7 +362,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   const [transformRevision, setTransformRevision] = useState(0)
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'resetting' | 'saved' | 'error'>('idle')
   const [draggingOverViewport, setDraggingOverViewport] = useState(false)
   const [error, setError] = useState('')
   const [modelColor, setModelColor] = useState(defaultModelColor)
@@ -383,7 +375,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   const [lightAzimuth, setLightAzimuth] = useState(defaultLightAzimuth)
   const [lightElevation, setLightElevation] = useState(defaultLightElevation)
   const [viewportId, setViewportId] = useState('square')
-  const viewport = viewportPresets.find((item) => item.id === viewportId) || viewportPresets[0]
+  const viewport = exportViewport ? { ...exportViewport, id: 'sketch', label: '手绘画板' } : viewportPresets.find((item) => item.id === viewportId) || viewportPresets[0]
   const selectedItem = sceneItems.find((item) => item.id === selectedItemId) || null
   const hasModel = sceneItems.length > 0
   const totalStats = sceneItems.reduce<ModelStats>((total, item) => ({
@@ -455,24 +447,39 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     return saved
   }
 
-  function saveSceneLocally() {
+  async function saveSceneLocally() {
+    if (loading || saveStatus === 'saving' || saveStatus === 'resetting') return
     const saved = captureSavedScene()
     if (!saved) return
+    setSaveStatus('saving')
+    setError('')
     try {
-      window.localStorage.setItem(model3DSceneStorageKey, JSON.stringify(saved))
+      await saveModel3DDraft(saved)
       setSaveStatus('saved')
-      window.setTimeout(() => setSaveStatus('idle'), 1800)
-    } catch {
+      window.setTimeout(() => setSaveStatus((status) => status === 'saved' ? 'idle' : status), 1800)
+    } catch (reason) {
       setSaveStatus('error')
-      setError('3D 场景保存失败，请检查浏览器存储权限。')
+      setError(model3DStorageErrorMessage(reason))
     }
   }
 
-  function resetSceneAndSavedData() {
+  async function resetSceneAndSavedData() {
+    if (saveStatus === 'saving' || saveStatus === 'resetting') return
     const runtime = runtimeRef.current
     if (!runtime) return
     loadSequenceRef.current += 1
-    window.localStorage.removeItem(model3DSceneStorageKey)
+    if (useSavedScene) {
+      setSaveStatus('resetting')
+      try {
+        await deleteModel3DDraft()
+      } catch (reason) {
+        setSaveStatus('error')
+        setLoading(false)
+        setError(`无法清除已保存的场景。${model3DStorageErrorMessage(reason)}`)
+        return
+      }
+      if (runtimeRef.current !== runtime) return
+    }
     runtime.transformControls.detach()
     runtime.selectionBox.visible = false
     allSceneItemsRef.current.forEach((item) => {
@@ -673,7 +680,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
-      alpha: false,
+      alpha: transparentExport,
       preserveDrawingBuffer: true,
       powerPreference: 'high-performance',
     })
@@ -809,10 +816,20 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     resizeObserver.observe(host)
     resize()
     controls.update()
-    const savedScene = initialScene || readSavedModel3DScene()
-    if (savedScene) {
+    const sequence = ++loadSequenceRef.current
+    if (initialScene || useSavedScene) {
       setLoading(true)
-      void restoreSavedSceneRef.current(savedScene).finally(() => setLoading(false))
+      void (async () => {
+        try {
+          const savedScene = initialScene || await readModel3DDraft()
+          if (sequence !== loadSequenceRef.current) return
+          if (savedScene) await restoreSavedSceneRef.current(savedScene)
+        } catch (reason) {
+          if (sequence === loadSequenceRef.current) setError(`无法恢复已保存的场景。${model3DStorageErrorMessage(reason)}`)
+        } finally {
+          if (sequence === loadSequenceRef.current) setLoading(false)
+        }
+      })()
     }
 
     const renderFrame = () => {
@@ -852,7 +869,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
       renderer.domElement.remove()
       runtimeRef.current = null
     }
-  }, [initialScene])
+  }, [initialScene, transparentExport, useSavedScene])
 
   useEffect(() => {
     const runtime = runtimeRef.current
@@ -1172,6 +1189,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   }
 
   async function restoreSavedScene(saved: SavedModel3DScene) {
+    const sequence = loadSequenceRef.current
     setViewportId(viewportPresets.some((preset) => preset.id === saved.viewportId) ? saved.viewportId : 'square')
     setBackgroundColor(saved.backgroundColor || defaultBackgroundColor)
     setFocalLength(saved.focalLength || 50)
@@ -1182,6 +1200,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     setLightElevation(Number.isFinite(saved.lightElevation) ? saved.lightElevation : defaultLightElevation)
     const restored: SceneItem[] = []
     for (const savedItem of saved.items) {
+      if (sequence !== loadSequenceRef.current) return
       if (savedItem.kind === 'parametric-box' && savedItem.settings) {
         const item = createParametricBox(savedItem.settings, false)
         if (item) {
@@ -1204,6 +1223,10 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
       } else if (savedItem.kind === 'imported-model' && savedItem.source) {
         try {
           const object = await parseSavedModelSource(savedItem.source)
+          if (sequence !== loadSequenceRef.current) {
+            disposeModel(object, null)
+            return
+          }
           const item = addSceneObject(
             object,
             savedItem.name,
@@ -1217,17 +1240,18 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
           applySavedTransform(item.object, savedItem.transform)
           restored.push(item)
         } catch (reason) {
-          setError(reason instanceof Error ? `部分模型恢复失败：${reason.message}` : '部分模型恢复失败')
+          if (sequence === loadSequenceRef.current) setError(reason instanceof Error ? `部分模型恢复失败：${reason.message}` : '部分模型恢复失败')
         }
       }
     }
+    if (sequence !== loadSequenceRef.current) return
     syncSceneItems()
     selectSceneItem(restored[saved.selectedIndex]?.id || restored.at(-1)?.id || null)
     savedCameraRef.current = saved.camera
     window.requestAnimationFrame(() => {
       const runtime = runtimeRef.current
       const camera = savedCameraRef.current
-      if (!runtime || !camera) return
+      if (!runtime || !camera || sequence !== loadSequenceRef.current) return
       runtime.camera.position.fromArray(camera.position)
       runtime.camera.up.fromArray(camera.up)
       runtime.controls.target.fromArray(camera.target)
@@ -1577,23 +1601,34 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
       const previousSize = runtime.renderer.getSize(new THREE.Vector2())
       const selectionWasVisible = runtime.selectionBox.visible
       const gizmoWasVisible = runtime.transformControls.getHelper().visible
-      runtime.selectionBox.visible = false
-      runtime.transformControls.getHelper().visible = false
-      runtime.renderer.setPixelRatio(1)
-      runtime.renderer.setSize(viewport.width, viewport.height, false)
-      runtime.camera.aspect = viewport.width / viewport.height
-      runtime.camera.updateProjectionMatrix()
-      runtime.controls.update()
-      runtime.renderer.render(runtime.scene, runtime.camera)
-      const dataUrl = runtime.renderer.domElement.toDataURL('image/png')
-
-      runtime.renderer.setPixelRatio(previousPixelRatio)
-      runtime.renderer.setSize(previousSize.x, previousSize.y, false)
-      runtime.camera.aspect = previousSize.x / previousSize.y
-      runtime.camera.updateProjectionMatrix()
-      runtime.selectionBox.visible = selectionWasVisible
-      runtime.transformControls.getHelper().visible = gizmoWasVisible
-      runtime.controls.update()
+      const groundWasVisible = runtime.ground.visible
+      const clearAlpha = runtime.renderer.getClearAlpha()
+      let dataUrl: string
+      try {
+        runtime.selectionBox.visible = false
+        runtime.transformControls.getHelper().visible = false
+        if (transparentExport) {
+          runtime.renderer.setClearAlpha(0)
+          runtime.ground.visible = false
+        }
+        runtime.renderer.setPixelRatio(1)
+        runtime.renderer.setSize(viewport.width, viewport.height, false)
+        runtime.camera.aspect = viewport.width / viewport.height
+        runtime.camera.updateProjectionMatrix()
+        runtime.controls.update()
+        runtime.renderer.render(runtime.scene, runtime.camera)
+        dataUrl = runtime.renderer.domElement.toDataURL('image/png')
+      } finally {
+        runtime.renderer.setClearAlpha(clearAlpha)
+        runtime.ground.visible = groundWasVisible
+        runtime.renderer.setPixelRatio(previousPixelRatio)
+        runtime.renderer.setSize(previousSize.x, previousSize.y, false)
+        runtime.camera.aspect = previousSize.x / previousSize.y
+        runtime.camera.updateProjectionMatrix()
+        runtime.selectionBox.visible = selectionWasVisible
+        runtime.transformControls.getHelper().visible = gizmoWasVisible
+        runtime.controls.update()
+      }
 
       const savedScene = captureSavedScene()
       if (!savedScene) throw new Error('无法保存当前 3D 场景')
@@ -1633,18 +1668,18 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
             <Box size={19} />
             <div>
               <h2>3D 模型预览</h2>
-              <p>创建参数化礼盒或导入本地模型，调整位置与构图后输出为画板参考图</p>
+              <p>{transparentExport ? '调整模型的位置、角度与颜色，确认后应用到手绘画板' : '创建参数化礼盒或导入本地模型，调整位置与构图后输出为画板参考图'}</p>
             </div>
           </div>
           <div className="model3d-head-actions">
-            <button className="model3d-reset-button" type="button" onClick={resetSceneAndSavedData} title="清空当前场景和本地保存">
+            <button className="model3d-reset-button" type="button" disabled={saveStatus === 'saving' || saveStatus === 'resetting'} onClick={resetSceneAndSavedData} title={useSavedScene ? '清空当前场景和本地保存' : '清空当前模型编辑场景'}>
               <RefreshCw size={14} />
-              重置
+              {saveStatus === 'resetting' ? '重置中…' : '重置'}
             </button>
-            <button className={`model3d-save-button ${saveStatus}`} type="button" onClick={saveSceneLocally}>
-              <Save size={15} />
-              {saveStatus === 'saved' ? '已保存' : saveStatus === 'error' ? '保存失败' : '保存场景'}
-            </button>
+            {useSavedScene && <button className={`model3d-save-button ${saveStatus}`} type="button" disabled={loading || saveStatus === 'saving' || saveStatus === 'resetting'} onClick={saveSceneLocally}>
+              {saveStatus === 'saving' ? <Loader2 size={15} className="model3d-spinner" /> : <Save size={15} />}
+              {saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '已保存' : saveStatus === 'error' ? '保存失败' : '保存场景'}
+            </button>}
             <button className="model3d-icon-button" type="button" onClick={onClose} title="关闭 3D 预览">
               <X size={18} />
             </button>
@@ -2012,6 +2047,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
                   }} />
                 </div>
               </label>
+              {transparentExport && <p className="model3d-sketch-color-note">确认后，当前模型颜色会和角度一起更新到手绘画板的模型图层。</p>}
             </section>
 
             <section className="model3d-control-section">
@@ -2092,11 +2128,12 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
               <div className="model3d-section-title"><ImagePlus size={15} /><strong>视窗尺寸</strong></div>
               <div className="model3d-size-options">
                 {viewportPresets.map((preset) => (
-                  <button type="button" className={preset.id === viewportId ? 'active' : ''} onClick={() => setViewportId(preset.id)} key={preset.id}>
+                  <button type="button" className={preset.id === viewportId ? 'active' : ''} disabled={Boolean(exportViewport)} onClick={() => setViewportId(preset.id)} key={preset.id}>
                     <span>{preset.label}</span><small>{preset.width} × {preset.height}</small>{preset.id === viewportId && <Check size={14} />}
                   </button>
                 ))}
               </div>
+              {exportViewport && <p className="model3d-control-hint">尺寸跟随手绘图层。透明输出不包含画板背景和地面投影。</p>}
             </section>
             {error && <div className="model3d-error" role="alert">{error}</div>}
           </aside>
@@ -2108,7 +2145,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
             <button className="model3d-secondary-button" type="button" onClick={onClose}>取消</button>
             <button className="model3d-export-button" type="button" onClick={exportCurrentView} disabled={!hasModel || loading || exporting}>
               {exporting ? <Loader2 className="model3d-spinner" size={15} /> : <ImagePlus size={15} />}
-              {exporting ? '正在保存' : sceneId ? '更新参考图' : '导出到画板'}
+              {exporting ? '正在应用' : transparentExport ? '应用角度与颜色到手绘画板' : sceneId ? '更新参考图' : '导出到画板'}
             </button>
           </div>
         </footer>

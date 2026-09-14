@@ -1,0 +1,494 @@
+.multi-angle-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 115;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(2, 5, 8, 0.76);
+  backdrop-filter: blur(12px);
+}
+
+.multi-angle-studio {
+  width: min(1080px, 100%);
+  max-height: calc(100dvh - 44px);
+  display: grid;
+  grid-template-rows: 64px auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--line-strong, rgba(164, 178, 195, 0.22));
+  border-radius: 12px;
+  background: var(--surface, #121820);
+  color: var(--text, #edf3f8);
+  box-shadow: 0 34px 110px rgba(0, 0, 0, 0.72);
+  font-size: 13px;
+}
+
+.multi-angle-studio button,
+.multi-angle-studio input,
+.multi-angle-studio textarea {
+  font: inherit;
+}
+
+.multi-angle-studio button {
+  cursor: pointer;
+}
+
+.multi-angle-studio button:disabled,
+.multi-angle-studio input:disabled,
+.multi-angle-studio textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.multi-angle-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line, rgba(142, 155, 170, 0.14));
+  padding: 0 24px;
+}
+
+.multi-angle-head > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.multi-angle-head strong {
+  font-size: 19px;
+  font-weight: 520;
+  letter-spacing: 0.01em;
+}
+
+.multi-angle-head > button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted, #9aa7b6);
+}
+
+.multi-angle-head > button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.055);
+  color: #fff;
+}
+
+.multi-angle-presets {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 14px 24px 10px;
+  scrollbar-width: thin;
+}
+
+.multi-angle-presets button {
+  min-width: max-content;
+  height: 43px;
+  border: 1px solid var(--line, rgba(142, 155, 170, 0.14));
+  border-radius: 9px;
+  background: rgba(8, 12, 17, 0.55);
+  color: var(--muted, #9aa7b6);
+  padding: 0 20px;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.multi-angle-presets button:hover:not(:disabled) {
+  border-color: var(--line-strong, rgba(164, 178, 195, 0.22));
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text, #edf3f8);
+}
+
+.multi-angle-presets button.active {
+  border-color: var(--accent-line, rgba(97, 199, 232, 0.48));
+  background: var(--accent-soft, rgba(97, 199, 232, 0.14));
+  color: #eefbff;
+}
+
+.multi-angle-body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(390px, 0.9fr) minmax(460px, 1.1fr);
+  gap: 28px;
+  overflow-y: auto;
+  padding: 10px 24px 20px;
+}
+
+.multi-angle-orbit-panel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.multi-angle-orbit-stage {
+  position: relative;
+  min-height: 392px;
+  overflow: hidden;
+  border: 1px solid var(--line, rgba(142, 155, 170, 0.14));
+  border-radius: 12px;
+  background: var(--surface-2, #161d26);
+}
+
+.multi-angle-orbit-visual {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 320px;
+  height: 320px;
+  transform: translate(-50%, -50%);
+}
+
+.multi-angle-orbit-stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.multi-angle-source-preview {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 122px;
+  height: 122px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 7px;
+  background: #f3f3f3;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.56);
+  transform-origin: center;
+  transform: translate(-50%, -50%);
+}
+
+.multi-angle-source-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.multi-angle-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(13, 19, 27, 0.82);
+  color: #c8d2dc;
+  z-index: 5;
+}
+
+.multi-angle-loading svg,
+.multi-angle-spinner {
+  animation: multi-angle-spin 0.8s linear infinite;
+}
+
+.multi-angle-camera-marker {
+  position: absolute;
+  z-index: 4;
+  display: grid;
+  width: 29px;
+  height: 29px;
+  place-items: center;
+  border: 1px solid rgba(196, 243, 255, 0.78);
+  border-radius: 9px;
+  background: var(--accent, #61c7e8);
+  color: #071019;
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.5), 0 0 0 4px rgba(97, 199, 232, 0.11);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  transition: left 180ms ease, top 180ms ease;
+}
+
+.multi-angle-studio .orbit-nudge {
+  position: absolute;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted, #9aa7b6);
+}
+
+.multi-angle-studio .orbit-nudge:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+}
+
+.orbit-nudge.top { top: 18px; left: 50%; transform: translateX(-50%); }
+.orbit-nudge.right { top: 50%; right: 16px; transform: translateY(-50%); }
+.orbit-nudge.bottom { bottom: 18px; left: 50%; transform: translateX(-50%); }
+.orbit-nudge.left { top: 50%; left: 16px; transform: translateY(-50%); }
+
+.multi-angle-view-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #aeb9c4;
+  padding: 0 4px;
+}
+
+.multi-angle-view-summary small {
+  color: var(--faint, #657282);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.multi-angle-controls {
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  padding: 10px 0 0;
+}
+
+.multi-angle-controls > label {
+  display: grid;
+  grid-template-columns: 100px minmax(180px, 1fr) 62px;
+  align-items: center;
+  gap: 16px;
+  color: var(--muted, #9aa7b6);
+  font-size: 16px;
+}
+
+.multi-angle-controls output {
+  color: var(--text, #edf3f8);
+  font-size: 17px;
+  font-weight: 620;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.multi-angle-controls input[type='range'] {
+  width: 100%;
+  height: 4px;
+  appearance: none;
+  border-radius: 999px;
+  outline: none;
+  background: #72808d;
+  accent-color: #fff;
+}
+
+.multi-angle-controls input[type='range']::-webkit-slider-thumb {
+  width: 21px;
+  height: 21px;
+  appearance: none;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+}
+
+.multi-angle-prompt-toggle-row {
+  display: grid;
+  grid-template-columns: 100px auto 1fr;
+  align-items: center;
+  gap: 16px;
+  color: var(--muted, #9aa7b6);
+  font-size: 16px;
+}
+
+.multi-angle-prompt-toggle-row small {
+  color: var(--faint, #657282);
+  font-size: 11px;
+}
+
+.multi-angle-studio .multi-angle-switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border: 0;
+  border-radius: 999px;
+  background: #42505c;
+  padding: 0;
+}
+
+.multi-angle-switch i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #0b1117;
+  transition: left 140ms ease, background 140ms ease;
+}
+
+.multi-angle-studio .multi-angle-switch.active {
+  background: var(--accent, #61c7e8);
+}
+
+.multi-angle-switch.active i {
+  left: 19px;
+  background: #071019;
+}
+
+.multi-angle-prompt-editor {
+  display: grid;
+  gap: 10px;
+  margin-top: -8px;
+  border: 1px solid var(--line-strong, rgba(164, 178, 195, 0.22));
+  border-radius: 10px;
+  background: rgba(8, 12, 17, 0.55);
+  padding: 13px;
+}
+
+.multi-angle-prompt-editor label {
+  display: grid;
+  gap: 8px;
+  color: #aeb9c4;
+}
+
+.multi-angle-prompt-editor textarea {
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid var(--line, rgba(142, 155, 170, 0.14));
+  border-radius: 8px;
+  outline: none;
+  background: #0b1117;
+  color: var(--text, #edf3f8);
+  padding: 10px 11px;
+  line-height: 1.55;
+}
+
+.multi-angle-prompt-editor textarea:focus {
+  border-color: var(--accent-line, rgba(97, 199, 232, 0.48));
+  box-shadow: 0 0 0 3px rgba(97, 199, 232, 0.08);
+}
+
+.multi-angle-prompt-editor details {
+  color: #8493a1;
+  font-size: 11px;
+}
+
+.multi-angle-prompt-editor summary {
+  cursor: pointer;
+}
+
+.multi-angle-prompt-editor p {
+  max-height: 118px;
+  overflow: auto;
+  margin: 9px 0 0;
+  border-top: 1px solid var(--line, rgba(142, 155, 170, 0.14));
+  color: #aeb9c4;
+  padding-top: 9px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.multi-angle-angle-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: 2px;
+  border: 1px solid var(--line, rgba(142, 155, 170, 0.14));
+  border-radius: 10px;
+  background: rgba(8, 12, 17, 0.55);
+  padding: 13px 14px;
+}
+
+.multi-angle-angle-card > span {
+  grid-row: 1 / 3;
+  color: var(--faint, #657282);
+}
+
+.multi-angle-angle-card strong {
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.multi-angle-angle-card small {
+  color: #8493a1;
+  font-size: 11px;
+}
+
+.multi-angle-error {
+  margin: 0 24px 12px;
+  border: 1px solid rgba(248, 113, 113, 0.32);
+  border-radius: 8px;
+  background: rgba(127, 29, 29, 0.2);
+  color: #ffc7c7;
+  padding: 9px 11px;
+  font-size: 11px;
+}
+
+.multi-angle-foot {
+  min-height: 74px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-top: 1px solid var(--line, rgba(142, 155, 170, 0.14));
+  padding: 0 24px;
+}
+
+.multi-angle-foot > div {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.multi-angle-foot > div > span {
+  color: var(--faint, #657282);
+  font-size: 11px;
+}
+
+.multi-angle-studio .multi-angle-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted, #9aa7b6);
+  padding: 8px 10px;
+  font-size: 15px;
+}
+
+.multi-angle-studio .multi-angle-reset:hover:not(:disabled) {
+  color: #fff;
+}
+
+.multi-angle-studio .multi-angle-generate {
+  display: grid;
+  width: 50px;
+  height: 50px;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  background: #eef2f5;
+  color: #10161d;
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.multi-angle-studio .multi-angle-generate:hover:not(:disabled) {
+  background: #fff;
+  transform: translateY(-1px);
+}
+
+@keyframes multi-angle-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 850px) {
+  .multi-angle-backdrop { padding: 8px; }
+  .multi-angle-studio { max-height: calc(100dvh - 16px); }
+  .multi-angle-body { grid-template-columns: 1fr; }
+  .multi-angle-orbit-stage { min-height: 330px; }
+  .multi-angle-controls > label { grid-template-columns: 88px minmax(130px, 1fr) 52px; }
+  .multi-angle-foot > div > span { display: none; }
+}
+
+@media (max-width: 560px) {
+  .multi-angle-head { padding: 0 14px; }
+  .multi-angle-presets { padding-inline: 14px; }
+  .multi-angle-body { padding-inline: 14px; }
+  .multi-angle-orbit-stage { min-height: 290px; }
+  .multi-angle-orbit-visual { width: 270px; height: 270px; }
+  .multi-angle-controls > label { grid-template-columns: 78px minmax(90px, 1fr) 44px; gap: 10px; font-size: 13px; }
+  .multi-angle-prompt-toggle-row { grid-template-columns: 78px auto 1fr; gap: 10px; font-size: 13px; }
+  .multi-angle-foot { padding-inline: 14px; }
+}

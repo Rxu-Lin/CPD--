@@ -5,6 +5,7 @@ import {
   BaseEdge,
   Controls,
   getBezierPath,
+  getViewportForBounds,
   Handle,
   MarkerType,
   Position,
@@ -49,6 +50,7 @@ import {
   Loader2,
   Pencil,
   RefreshCw,
+  Rotate3D,
   Save,
   Settings,
   Trash2,
@@ -66,6 +68,8 @@ import promptLibraryMarkdown from '../提示词.md?raw'
 import SpecularButton from './SpecularButton'
 import UnifiedRange from './UnifiedRange'
 import './App.css'
+import { generationPromptText, migrateLegacyPromptNodes } from './workflowPrompts'
+import { canvasMediaClipboardType, createCanvasMediaClipboard, createDraggedMediaNodes, createPastedMediaNodes, mediaDataForCopy, parseCanvasMediaClipboard, serializeCanvasMediaClipboard, type CanvasMediaClipboard } from './canvasMediaClipboard'
 import {
   defaultGrsAiModel,
   findGrsAiModel,
@@ -83,8 +87,14 @@ import {
   saveModel3DScenes,
   type SavedModel3DScene,
 } from './model3dSceneStore'
+import { sketchGenerationInstruction, sketchSceneIds, type SketchDocument, type SketchModelOption } from './sketchDocument'
+import type { ElementEditOperation, ElementEditResult } from './ElementEditStudio'
+import type { MultiAngleResult } from './MultiAngleStudio'
 
 const Model3DStudio = lazy(() => import('./Model3DStudio'))
+const SketchStudio = lazy(() => import('./SketchStudio'))
+const ElementEditStudio = lazy(() => import('./ElementEditStudio'))
+const MultiAngleStudio = lazy(() => import('./MultiAngleStudio'))
 
 type NodeKind = 'prompt' | 'image' | 'video' | 'reference' | 'video-reference' | 'repaint' | 'outpaint' | 'group'
 type NodeStatus = 'idle' | 'generating' | 'done' | 'error'
@@ -254,6 +264,10 @@ type LightDirection = {
 type WorkflowNodeData = {
   kind: NodeKind
   apiMode?: ApiMode
+  generationPanelOpen?: boolean
+  generationModelOptions?: Array<{ id: string; label: string }>
+  imageResolutionOptions?: ImageResolutionTier[]
+  onEnsureGenerationPanelVisible?: (id: string) => void
   title: string
   prompt?: string
   promptMentions?: PromptMentionBinding[]
@@ -264,6 +278,9 @@ type WorkflowNodeData = {
   videoDurationSeconds?: number
   sourceImageUrl?: string
   maskUrl?: string
+  elementEditOperations?: ElementEditOperation[]
+  elementEditRequestSize?: string
+  multiAngleSettings?: MultiAngleResult
   brushSize?: number
   brushColor?: RepaintBrushColor
   sourceWidth?: number
@@ -278,10 +295,10 @@ type WorkflowNodeData = {
   videoDuration?: number
   lightDirection?: LightDirection
   model3DSceneId?: string
+  sketch?: SketchDocument
   sourceName?: string
   error?: string
   createdAt: string
-  promptInputConnected?: boolean
   imageInputConnected?: boolean
   imageInputSlots?: ImageInputSlot[]
   videoInputConnected?: boolean
@@ -290,6 +307,8 @@ type WorkflowNodeData = {
   memberCount?: number
   onDelete?: (id: string) => void
   onDownload?: (id: string) => void
+  onCopyResult?: (id: string) => void
+  resultCopied?: boolean
   onRevealImage?: (id: string) => void
   onReplaceImage?: (id: string, file: File) => void
   onReplaceVideo?: (id: string, file: File) => void
@@ -303,13 +322,11 @@ type WorkflowNodeData = {
   onChangeLightDirection?: (id: string, direction: LightDirection) => void
   onOpenLightDirection?: (id: string) => void
   onEditModel3D?: (id: string) => void
-  onCreateRepaint?: (id: string) => void
+  onEditSketch?: (id: string) => void
+  onOpenElementEdit?: (id: string) => void
+  onOpenMultiAngle?: (id: string) => void
   onChangePrompt?: (id: string, prompt: string, mentions?: PromptMentionBinding[]) => void
   onLocatePromptMention?: (nodeId: string) => void
-  onChangeMask?: (id: string, maskUrl: string) => void
-  onChangeBrush?: (id: string, brushSize: number) => void
-  onChangeBrushColor?: (id: string, brushColor: RepaintBrushColor) => void
-  onClearMask?: (id: string) => void
   onChangeOutpaintInsets?: (id: string, insets: OutpaintInsets) => void
   onApplyOutpaintPreset?: (id: string, preset: OutpaintPreset) => void
   onResetOutpaintPrompt?: (id: string) => void
@@ -318,6 +335,15 @@ type WorkflowNodeData = {
 }
 
 type WorkflowNode = Node<WorkflowNodeData, 'workflow'>
+type AltMediaDragState = {
+  anchorNodeId: string
+  anchorStart: XYPosition
+  clipboard: CanvasMediaClipboard
+  sourcePositions: Map<string, XYPosition>
+}
+
+let activeAltMediaDrag: AltMediaDragState | null = null
+
 type WorkflowEdgeData = Record<string, unknown> & {
   onDisconnect?: (edgeId: string) => void
 }
@@ -410,19 +436,11 @@ function normalizeImageInputEdges(edgeValues: Edge[], nodeValues: WorkflowNode[]
   return changed ? normalizedEdges : edgeValues
 }
 
-function promptMentionOptionsForNode(promptNodeId: string, nodeValues: WorkflowNode[], edgeValues: Edge[]) {
+function promptMentionOptionsForNode(generationNodeId: string, nodeValues: WorkflowNode[], edgeValues: Edge[]) {
   const nodeById = new Map(nodeValues.map((node) => [node.id, node]))
-  const targetGenerationNodes = edgeValues
-    .filter((edge) => {
-      const target = nodeById.get(edge.target)
-      return (
-        edge.source === promptNodeId &&
-        (target?.data.kind === 'image' || target?.data.kind === 'video') &&
-        (edge.targetHandle === 'prompt' || !edge.targetHandle)
-      )
-    })
-    .map((edge) => nodeById.get(edge.target))
-    .filter((node): node is WorkflowNode => Boolean(node))
+  const targetGenerationNodes = nodeValues.filter((node) =>
+    node.id === generationNodeId && (node.data.kind === 'image' || node.data.kind === 'video'),
+  )
   const options: PromptMentionOption[] = []
   const seenNodeIds = new Set<string>()
 
@@ -1047,7 +1065,7 @@ function numericNodeDimension(value: unknown) {
 
 function getWorkflowNodeSize(node: WorkflowNode) {
   const fallbackWidth = node.data.kind === 'outpaint' ? 410 : node.data.kind === 'repaint' ? 360 : node.data.kind === 'image' || node.data.kind === 'video' || node.data.kind === 'prompt' ? 330 : 312
-  const fallbackHeight = node.data.kind === 'outpaint' ? 780 : node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' || node.data.kind === 'video' ? 480 : node.data.kind === 'reference' ? 360 : 250
+  const fallbackHeight = node.data.kind === 'outpaint' ? 780 : node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' || node.data.kind === 'video' ? 680 : node.data.kind === 'reference' ? 360 : 250
   return {
     width: node.measured?.width || node.width || numericNodeDimension(node.style?.width) || fallbackWidth,
     height: node.measured?.height || node.height || numericNodeDimension(node.style?.height) || fallbackHeight,
@@ -1184,13 +1202,11 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onChangeLightDirection,
     onOpenLightDirection,
     onEditModel3D,
-    onCreateRepaint,
+    onEditSketch,
+    onOpenElementEdit,
+    onOpenMultiAngle,
     onChangePrompt,
     onLocatePromptMention,
-    onChangeMask,
-    onChangeBrush,
-    onChangeBrushColor,
-    onClearMask,
     onChangeOutpaintInsets,
     onApplyOutpaintPreset,
     onResetOutpaintPrompt,
@@ -1216,13 +1232,11 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onChangeLightDirection
   void onOpenLightDirection
   void onEditModel3D
-  void onCreateRepaint
+  void onEditSketch
+  void onOpenElementEdit
+  void onOpenMultiAngle
   void onChangePrompt
   void onLocatePromptMention
-  void onChangeMask
-  void onChangeBrush
-  void onChangeBrushColor
-  void onClearMask
   void onChangeOutpaintInsets
   void onApplyOutpaintPreset
   void onResetOutpaintPrompt
@@ -1251,11 +1265,13 @@ function normalizeImportedProject(project: Partial<ProjectFile>): ProjectFile {
     throw new Error('INVALID_PROJECT')
   }
 
+  const migrated = migrateLegacyPromptNodes((project.nodes as WorkflowNode[]).map(cleanNode), (project.edges as Edge[]).map(cleanEdge))
+
   return {
     version: project.version === 3 ? 3 : project.version === 2 ? 2 : 1,
     projectName: project.projectName || '导入项目',
-    nodes: (project.nodes as WorkflowNode[]).map(cleanNode),
-    edges: (project.edges as Edge[]).map(cleanEdge),
+    nodes: migrated.nodes,
+    edges: normalizeImageInputEdges(migrated.edges, migrated.nodes),
     history: Array.isArray(project.history) ? project.history : [],
     model3DScenes: project.model3DScenes && typeof project.model3DScenes === 'object'
       ? project.model3DScenes
@@ -1365,6 +1381,10 @@ async function buildPackageProject(
         videoUrl: await cacheVideo(clean.data.videoUrl, clean.data.sourceName),
         sourceImageUrl: await cacheImage(clean.data.sourceImageUrl),
         maskUrl: await cacheImage(clean.data.maskUrl),
+        sketch: clean.data.sketch ? {
+          ...clean.data.sketch,
+          layers: await Promise.all(clean.data.sketch.layers.map(async (layer) => ({ ...layer, imageUrl: await cacheImage(layer.imageUrl) }))),
+        } : undefined,
       },
     })
   }
@@ -1383,7 +1403,7 @@ async function buildPackageProject(
   }
 
   const sceneIds = cleanNodes
-    .map((node) => node.data.model3DSceneId)
+    .flatMap((node) => [node.data.model3DSceneId, ...sketchSceneIds(node.data.sketch)])
     .filter((sceneId): sceneId is string => Boolean(sceneId))
   const storedScenes = await readModel3DScenes(sceneIds)
   const missingSceneIds = [...new Set(sceneIds)].filter((sceneId) => !storedScenes[sceneId])
@@ -1545,7 +1565,10 @@ function escapeSvg(value: string) {
 }
 
 function getAspectRatioOption(size?: string) {
-  return aspectRatioOptions.find((option) => option.size === size) ?? defaultAspectRatioOption
+  const exactOption = aspectRatioOptions.find((option) => option.size === size)
+  if (exactOption) return exactOption
+  const { width, height } = parseImageSize(size)
+  return nearestAspectRatioOption(width, height)
 }
 
 function parseImageSize(size?: string) {
@@ -1787,6 +1810,23 @@ async function cacheCanvasImage(imageUrl: string) {
   return payload.imageUrl
 }
 
+async function fitImageToExactSize(imageUrl: string, width: number, height: number) {
+  const safeWidth = Math.max(1, Math.round(width))
+  const safeHeight = Math.max(1, Math.round(height))
+  const image = await loadCanvasImage(await imageAsDataUrl(imageUrl))
+  if (image.naturalWidth === safeWidth && image.naturalHeight === safeHeight) return imageUrl
+
+  const canvas = document.createElement('canvas')
+  canvas.width = safeWidth
+  canvas.height = safeHeight
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('浏览器无法恢复原图尺寸。')
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(image, 0, 0, safeWidth, safeHeight)
+  return cacheCanvasImage(canvas.toDataURL('image/png'))
+}
+
 async function prepareOutpaintInputs(
   sourceImageUrl: string,
   sourceWidth: number,
@@ -1911,131 +1951,6 @@ async function recolorRepaintMask(maskUrl: string, brushColor: RepaintBrushColor
   }
   context.putImageData(pixels, 0, 0)
   return canvas.toDataURL('image/png')
-}
-
-type RepaintMaskEditorProps = {
-  sourceImageUrl?: string
-  maskUrl?: string
-  brushSize: number
-  brushColor: RepaintBrushColor
-  size?: string
-  aspectRatio: string
-  disabled: boolean
-  onChangeMask: (maskUrl: string) => void
-}
-
-function RepaintMaskEditor({
-  sourceImageUrl,
-  maskUrl,
-  brushSize,
-  brushColor,
-  size,
-  aspectRatio,
-  disabled,
-  onChangeMask,
-}: RepaintMaskEditorProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const drawingRef = useRef(false)
-  const lastPointRef = useRef<{ x: number; y: number } | null>(null)
-  const canvasSize = parseImageSize(size)
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const context = canvas.getContext('2d')
-    if (!context) return
-    context.clearRect(0, 0, canvas.width, canvas.height)
-    if (!maskUrl) return
-
-    const image = new Image()
-    image.onload = () => {
-      context.clearRect(0, 0, canvas.width, canvas.height)
-      context.drawImage(image, 0, 0, canvas.width, canvas.height)
-      const pixels = context.getImageData(0, 0, canvas.width, canvas.height)
-      const [red, green, blue] = repaintBrushOptions[brushColor].rgb
-      for (let index = 0; index < pixels.data.length; index += 4) {
-        if (pixels.data[index + 3] === 0) continue
-        pixels.data[index] = red
-        pixels.data[index + 1] = green
-        pixels.data[index + 2] = blue
-      }
-      context.putImageData(pixels, 0, 0)
-    }
-    image.src = maskUrl
-  }, [brushColor, maskUrl])
-
-  function pointFromEvent(event: ReactPointerEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current
-    if (!canvas) return null
-    const rect = canvas.getBoundingClientRect()
-    return {
-      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
-      y: ((event.clientY - rect.top) / rect.height) * canvas.height,
-    }
-  }
-
-  function drawTo(point: { x: number; y: number }) {
-    const canvas = canvasRef.current
-    const lastPoint = lastPointRef.current
-    if (!canvas || !lastPoint) return
-    const context = canvas.getContext('2d')
-    if (!context) return
-    context.lineCap = 'round'
-    context.lineJoin = 'round'
-    context.lineWidth = brushSize
-    context.strokeStyle = repaintBrushOptions[brushColor].stroke
-    context.beginPath()
-    context.moveTo(lastPoint.x, lastPoint.y)
-    context.lineTo(point.x, point.y)
-    context.stroke()
-    lastPointRef.current = point
-  }
-
-  function saveMask() {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    onChangeMask(canvas.toDataURL('image/png'))
-  }
-
-  function handlePointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (disabled) return
-    const point = pointFromEvent(event)
-    if (!point) return
-    event.currentTarget.setPointerCapture(event.pointerId)
-    drawingRef.current = true
-    lastPointRef.current = point
-    drawTo({ x: point.x + 0.01, y: point.y + 0.01 })
-  }
-
-  function handlePointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!drawingRef.current || disabled) return
-    const point = pointFromEvent(event)
-    if (point) drawTo(point)
-  }
-
-  function stopDrawing() {
-    if (!drawingRef.current) return
-    drawingRef.current = false
-    lastPointRef.current = null
-    saveMask()
-  }
-
-  return (
-    <div className="repaint-editor nodrag nopan nowheel" style={{ aspectRatio }}>
-      {sourceImageUrl ? <img src={sourceImageUrl} alt="重绘参考图" draggable={false} /> : <ImageIcon size={28} />}
-      <canvas
-        ref={canvasRef}
-        width={canvasSize.width}
-        height={canvasSize.height}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={stopDrawing}
-        onPointerCancel={stopDrawing}
-        onPointerLeave={stopDrawing}
-      />
-      <span className="repaint-hint">涂抹需要重绘的区域</span>
-    </div>
-  )
 }
 
 type OutpaintRangeEditorProps = {
@@ -2409,6 +2324,8 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const replaceVideoInputRef = useRef<HTMLInputElement>(null)
   const promptTextareaRef = useRef<HTMLTextAreaElement>(null)
   const modelPickerRef = useRef<HTMLDivElement>(null)
+  const ensurePanelVisibleRef = useRef(data.onEnsureGenerationPanelVisible)
+  ensurePanelVisibleRef.current = data.onEnsureGenerationPanelVisible
   const isPromptComposingRef = useRef(false)
   const lastCommittedPromptRef = useRef(data.prompt || '')
   const [promptDraft, setPromptDraft] = useState(data.prompt || '')
@@ -2422,7 +2339,10 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const isImage = data.kind === 'image'
   const isVideo = data.kind === 'video'
-  const isPrompt = data.kind === 'prompt'
+  const isElementEditResult = isImage && Boolean(data.elementEditOperations?.length)
+  const isMultiAngleResult = isImage && Boolean(data.multiAngleSettings)
+  const isDirectEditResult = isElementEditResult || isMultiAngleResult
+  const supportsPromptMentions = (isImage || isVideo) && !isDirectEditResult
   const isReference = data.kind === 'reference'
   const isVideoReference = data.kind === 'video-reference'
   const isRepaint = data.kind === 'repaint'
@@ -2431,7 +2351,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const isGenerating = data.status === 'generating'
   const isDone = data.status === 'done'
   const isError = data.status === 'error'
-  const promptMentionOptions = isPrompt ? (data.promptMentionOptions || []) : []
+  const promptMentionOptions = supportsPromptMentions ? (data.promptMentionOptions || []) : []
   const filteredPromptMentionOptions = promptMentionOptions.filter((option) => {
     const query = mentionQuery.trim().toLocaleLowerCase()
     if (!query) return true
@@ -2439,8 +2359,8 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   })
   const visiblePromptMentions = activePromptMentions(promptDraft, promptMentionBindings)
   const selectedAspectRatio = getAspectRatioOption(data.size)
-  const brushSize = data.brushSize || 36
-  const brushColor = data.brushColor || 'red'
+  const nodePixelSize = parseImageSize(data.size)
+  const nodeFrameAspectRatio = `${nodePixelSize.width} / ${nodePixelSize.height}`
   const sourceWidth = data.sourceWidth || 1024
   const sourceHeight = data.sourceHeight || 1024
   const outpaintInsets = data.outpaintInsets || defaultOutpaintInsets(sourceWidth, sourceHeight)
@@ -2450,7 +2370,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const imageModelConfig = findApiMartModel(configuredModelName)
   const selectedImageSize = data.imageSize && imageModelConfig.resolutions.includes(data.imageSize)
     ? data.imageSize
-    : imageModelConfig.defaultResolution
+    : data.imageSize || imageModelConfig.defaultResolution
   const videoModelConfig = findApiMartVideoModel(configuredModelName)
   const selectedVideoResolution = data.videoResolution && videoModelConfig.resolutions.includes(data.videoResolution)
     ? data.videoResolution
@@ -2459,16 +2379,21 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const selectedVideoDuration = Number.isFinite(requestedVideoDuration)
     ? Math.min(videoModelConfig.maxDuration, Math.max(videoModelConfig.minDuration, Math.round(requestedVideoDuration)))
     : videoModelConfig.defaultDuration
-  const hasNodeModelPicker = usesApiMartNodeSettings && (isImage || isVideo)
+  const panelOpen = supportsPromptMentions && (data.generationPanelOpen ?? selected)
+  const imageResolutionOptions = data.imageResolutionOptions ?? (usesApiMartNodeSettings ? imageModelConfig.resolutions : [])
   const supportsReferenceVideo = isVideo && videoModelConfig.maxReferenceVideos > 0
-  const modelOptions: Array<{ id: string; label: string }> = isVideo ? apiMartVideoModels : apiMartModels
-  const selectedModelId = isVideo ? videoModelConfig.id : imageModelConfig.id
-  const selectedModelLabel = isVideo ? videoModelConfig.label : imageModelConfig.label
-  const nodeTitle = isReference || isVideoReference
-    ? (data.sourceName || data.title)
-    : isImage || isVideo
-      ? (apiModelDisplayName(configuredModelName) || data.title)
-      : data.title
+  const modelOptions = data.generationModelOptions ?? (isVideo ? apiMartVideoModels : usesApiMartNodeSettings ? apiMartModels : [{ id: configuredModelName, label: apiModelDisplayName(configuredModelName) || '当前模型' }])
+  const selectedModelId = isVideo ? videoModelConfig.id : usesApiMartNodeSettings ? imageModelConfig.id : configuredModelName
+  const selectedModelLabel = modelOptions.find((model) => model.id === selectedModelId)?.label || apiModelDisplayName(configuredModelName) || '当前模型'
+  const nodeTitle = isElementEditResult
+    ? `元素编辑结果 · ${sourceWidth} × ${sourceHeight}`
+    : isMultiAngleResult
+      ? `多角度结果 · ${sourceWidth} × ${sourceHeight}`
+    : isReference || isVideoReference
+      ? (data.sourceName || data.title)
+      : isImage || isVideo
+        ? (apiModelDisplayName(configuredModelName) || data.title)
+        : data.title
   const imageInputSlots = isImage || isVideo
     ? data.imageInputSlots?.length
       ? data.imageInputSlots
@@ -2479,7 +2404,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       ? data.videoInputSlots
       : [{ id: `${videoInputHandlePrefix}1`, index: 1, connected: false }]
     : []
-  const totalInputSlots = 1 + imageInputSlots.length + videoInputSlots.length
+  const totalInputSlots = imageInputSlots.length + videoInputSlots.length
   const inputPortSpan = Math.min(60, (totalInputSlots - 1) * 12)
   const inputPortStep = totalInputSlots > 1 ? inputPortSpan / (totalInputSlots - 1) : 0
   const inputPortTop = (rowIndex: number) => `${50 - inputPortSpan / 2 + inputPortStep * rowIndex}%`
@@ -2490,7 +2415,24 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
   useEffect(() => {
     updateNodeInternals(nodeId)
-  }, [imageSlotSignature, nodeId, updateNodeInternals])
+    if (!panelOpen) return
+    let timer: number | undefined
+    const ensureVisible = () => {
+      window.clearTimeout(timer)
+      // Allow the existing quick-workflow viewport animation to finish first.
+      timer = window.setTimeout(() => ensurePanelVisibleRef.current?.(nodeId), 300)
+    }
+    const panel = modelPickerRef.current?.closest('.generation-panel')
+    const observer = new ResizeObserver(ensureVisible)
+    if (panel) observer.observe(panel)
+    window.addEventListener('resize', ensureVisible)
+    ensureVisible()
+    return () => {
+      window.clearTimeout(timer)
+      observer.disconnect()
+      window.removeEventListener('resize', ensureVisible)
+    }
+  }, [imageSlotSignature, nodeId, updateNodeInternals, panelOpen, data.size])
 
   useEffect(() => {
     if (!isReference) return
@@ -2529,8 +2471,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   }, [isModelMenuOpen])
 
   useEffect(() => {
-    if (isGenerating) setIsModelMenuOpen(false)
-  }, [isGenerating])
+    if (isGenerating || !panelOpen) {
+      setIsModelMenuOpen(false)
+      setMentionMenuOpen(false)
+    }
+  }, [isGenerating, panelOpen])
 
   const selectNodeModel = (modelId: string) => {
     if (isImage) data.onChangeImageModel?.(nodeId, modelId)
@@ -2547,7 +2492,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   }
 
   const updatePromptMentionMenu = (value: string, caret: number | null) => {
-    if (!isPrompt || caret === null) {
+    if (!supportsPromptMentions || caret === null) {
       setMentionMenuOpen(false)
       return
     }
@@ -2595,6 +2540,120 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     }, 0)
   }
 
+  const promptEditor = (
+    <div className="image-prompt-control nodrag nopan nowheel">
+      <span className="image-prompt-heading">
+        <span>提示词</span>
+        {isOutpaint && (
+          <button type="button" onClick={() => data.onResetOutpaintPrompt?.(nodeId)} disabled={isGenerating}>
+            恢复默认
+          </button>
+        )}
+      </span>
+      <div className="prompt-editor-shell">
+        <textarea
+          ref={promptTextareaRef}
+          aria-label={isVideo ? '视频生成提示词' : isImage ? '图像生成提示词' : '提示词'}
+          value={promptDraft}
+          rows={isOutpaint ? 6 : 4}
+          placeholder={isOutpaint ? '描述希望扩展出的画面内容' : supportsPromptMentions ? '输入提示词，键入 @ 引用已连接素材' : '输入提示词'}
+          onCompositionStart={() => {
+            isPromptComposingRef.current = true
+          }}
+          onCompositionEnd={(event) => {
+            isPromptComposingRef.current = false
+            const nextPrompt = event.currentTarget.value
+            setPromptDraft(nextPrompt)
+            commitPromptDraft(nextPrompt)
+            updatePromptMentionMenu(nextPrompt, event.currentTarget.selectionStart)
+          }}
+          onKeyDown={(event) => {
+            if (mentionMenuOpen && !isPromptComposingRef.current) {
+              if (event.key === 'ArrowDown' && filteredPromptMentionOptions.length) {
+                event.preventDefault()
+                setMentionSelection((current) => (current + 1) % filteredPromptMentionOptions.length)
+              } else if (event.key === 'ArrowUp' && filteredPromptMentionOptions.length) {
+                event.preventDefault()
+                setMentionSelection((current) => (current - 1 + filteredPromptMentionOptions.length) % filteredPromptMentionOptions.length)
+              } else if ((event.key === 'Enter' || event.key === 'Tab') && filteredPromptMentionOptions[mentionSelection]) {
+                event.preventDefault()
+                insertPromptMention(filteredPromptMentionOptions[mentionSelection])
+              } else if (event.key === 'Escape') {
+                event.preventDefault()
+                setMentionMenuOpen(false)
+              }
+            }
+            event.stopPropagation()
+          }}
+          onClick={(event) => updatePromptMentionMenu(event.currentTarget.value, event.currentTarget.selectionStart)}
+          onBlur={() => window.setTimeout(() => setMentionMenuOpen(false), 80)}
+          onChange={(event) => {
+            const nextPrompt = event.currentTarget.value
+            setPromptDraft(nextPrompt)
+            if (!isPromptComposingRef.current) {
+              commitPromptDraft(nextPrompt)
+              updatePromptMentionMenu(nextPrompt, event.currentTarget.selectionStart)
+            }
+          }}
+        />
+        {supportsPromptMentions && mentionMenuOpen && (
+          <div className="prompt-mention-menu nodrag nopan nowheel" role="listbox" aria-label="可引用素材">
+            <div className="prompt-mention-menu-title"><AtSign size={13} /> 引用已连接素材</div>
+            {filteredPromptMentionOptions.length ? filteredPromptMentionOptions.map((option, index) => (
+              <button
+                key={`${option.nodeId}-${option.kind}`}
+                className={`prompt-mention-option ${index === mentionSelection ? 'selected' : ''}`}
+                type="button"
+                role="option"
+                aria-selected={index === mentionSelection}
+                onPointerDown={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  insertPromptMention(option)
+                }}
+              >
+                <span className="prompt-mention-preview" aria-hidden="true">
+                  {option.kind === 'image' && option.previewUrl
+                    ? <img src={option.previewUrl} alt="" draggable={false} />
+                    : <Video size={15} />}
+                </span>
+                <span className="prompt-mention-option-copy">
+                  <strong>{option.token}</strong>
+                  <small>{option.label}</small>
+                </span>
+                <em>{option.kind === 'image' ? `Image ${option.slotIndex}` : `Video ${option.slotIndex}`}</em>
+              </button>
+            )) : (
+              <div className="prompt-mention-empty">
+                {promptMentionOptions.length ? '没有匹配的素材' : '请先把参考图或参考视频连接到当前生成框'}
+              </div>
+            )}
+          </div>
+        )}
+        {supportsPromptMentions && visiblePromptMentions.length > 0 && (
+          <div className="prompt-mention-chips" aria-label="提示词已引用素材">
+            {visiblePromptMentions.map((mention) => {
+              const available = promptMentionOptions.some((option) => option.nodeId === mention.nodeId)
+              return (
+                <button
+                  key={`${mention.token}-${mention.nodeId}`}
+                  className={available ? '' : 'missing'}
+                  type="button"
+                  title={available ? `定位 ${mention.label}` : `${mention.label} 未连接到当前生成框`}
+                  onClick={() => data.onLocatePromptMention?.(mention.nodeId)}
+                >
+                  {mention.kind === 'image' ? <ImageIcon size={11} /> : <Video size={11} />}
+                  {mention.token}
+                  {!available && <AlertTriangle size={11} />}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
   if (isGroup) {
     return (
       <div className={`workflow-group ${selected ? 'selected' : ''}`}>
@@ -2616,7 +2675,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   }
 
   return (
-    <div className={`workflow-node ${selected ? 'selected' : ''} ${data.kind}`}>
+    <div className={`workflow-node-shell ${selected ? 'selected' : ''}`}>
+    <div
+      className={`workflow-node ${selected ? 'selected' : ''} ${data.kind}`}
+      title={mediaDataForCopy(data) ? '按住 Alt 并用鼠标左键拖动，可创建保留提示词的独立副本' : undefined}
+    >
       {selected && (isReference || isImage) && (
         <div
           className="image-context-actions nodrag nopan nowheel"
@@ -2635,15 +2698,24 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           <button
             type="button"
             disabled={!data.imageUrl || isGenerating}
-            title={data.imageUrl ? '创建并连接局部重绘框' : '请先上传或生成图片'}
-            onClick={() => data.onCreateRepaint?.(nodeId)}
+            title={data.imageUrl ? '打开多角度编辑器' : '请先上传或生成图片'}
+            onClick={() => data.onOpenMultiAngle?.(nodeId)}
           >
-            <Brush size={14} />
-            局部重绘
+            <Rotate3D size={14} />
+            多角度编辑
+          </button>
+          <button
+            type="button"
+            disabled={!data.imageUrl || isGenerating}
+            title={data.imageUrl ? '打开元素编辑工作台' : '请先上传或生成图片'}
+            onClick={() => data.onOpenElementEdit?.(nodeId)}
+          >
+            <Wand2 size={14} />
+            元素编辑
           </button>
         </div>
       )}
-      {(isImage || isVideo || isRepaint || isOutpaint) && (
+      {(isImage || isVideo || isOutpaint) && (
         <>
           {imageInputSlots.map((slot, index) => {
             const label = isImage || isVideo ? `Image ${slot.index}` : 'Image'
@@ -2687,28 +2759,10 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               />,
             ]
           })}
-          <span
-            className="node-port-label prompt-input-label"
-            style={{ top: inputPortTop(imageInputSlots.length + videoInputSlots.length) }}
-            aria-hidden="true"
-          >
-            <Wand2 size={13} />
-            Prompt
-          </span>
-          <Handle
-            id="prompt"
-            type="target"
-            position={Position.Left}
-            className={`node-handle prompt-input-handle ${data.promptInputConnected ? 'connected' : ''}`}
-            style={{ top: inputPortTop(imageInputSlots.length + videoInputSlots.length) }}
-            isConnectable={!data.promptInputConnected}
-            aria-label="Prompt 输入"
-            title="连接提示词节点，或向左拖出提示词节点"
-          />
         </>
       )}
       <div className="node-head">
-        <div className={`node-title ${hasNodeModelPicker ? 'has-model-picker' : ''}`}>
+        <div className="node-title">
           {isRepaint ? (
             <Brush size={15} />
           ) : isOutpaint ? (
@@ -2724,57 +2778,9 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           ) : (
             <Wand2 size={15} />
           )}
-          {hasNodeModelPicker ? (
-            <div
-              ref={modelPickerRef}
-              className={`node-model-picker nodrag nopan nowheel ${isModelMenuOpen ? 'open' : ''}`}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              <button
-                className="node-model-select"
-                type="button"
-                aria-label={isVideo ? '视频生成模型' : '图像生成模型'}
-                aria-haspopup="listbox"
-                aria-expanded={isModelMenuOpen}
-                title={isModelMenuOpen ? '收起模型列表' : '展开模型列表'}
-                disabled={isGenerating}
-                onClick={() => setIsModelMenuOpen((open) => !open)}
-              >
-                <span>{selectedModelLabel}</span>
-                <ChevronDown size={14} aria-hidden="true" />
-              </button>
-              {isModelMenuOpen && (
-                <div
-                  className="node-model-menu"
-                  role="listbox"
-                  aria-label={isVideo ? '可选视频模型' : '可选图像模型'}
-                >
-                  {modelOptions.map((model) => {
-                    const isSelectedModel = model.id === selectedModelId
-                    return (
-                      <button
-                        key={model.id}
-                        className={`node-model-option ${isSelectedModel ? 'selected' : ''}`}
-                        type="button"
-                        role="option"
-                        aria-selected={isSelectedModel}
-                        onClick={() => selectNodeModel(model.id)}
-                      >
-                        {model.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          ) : (
-            <span
-              className={(isReference || isVideoReference) ? 'reference-file-title' : undefined}
-              title={(isReference || isVideoReference || isImage || isVideo) ? nodeTitle : undefined}
-            >
-              {nodeTitle}
-            </span>
-          )}
+          <span className={(isReference || isVideoReference) ? 'reference-file-title' : undefined} title={nodeTitle}>
+            {nodeTitle}
+          </span>
         </div>
         {isReference || isVideoReference ? (
           <div
@@ -2806,130 +2812,17 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
         )}
       </div>
 
-      {(isPrompt || isRepaint || isOutpaint) ? (
-        <label className="image-prompt-control nodrag nopan nowheel">
-          <span className="image-prompt-heading">
-            <span>提示词</span>
-            {isOutpaint && (
-              <button type="button" onClick={() => data.onResetOutpaintPrompt?.(nodeId)} disabled={isGenerating}>
-                恢复默认
-              </button>
-            )}
-          </span>
-          <div className="prompt-editor-shell">
-            <textarea
-              ref={promptTextareaRef}
-              value={promptDraft}
-              rows={isRepaint ? 4 : isOutpaint ? 6 : 5}
-              placeholder={isRepaint ? '描述涂抹区域要重绘成什么' : isOutpaint ? '描述希望扩展出的画面内容' : isPrompt ? '输入提示词，键入 @ 引用已连接素材' : '输入提示词'}
-              onCompositionStart={() => {
-                isPromptComposingRef.current = true
-              }}
-              onCompositionEnd={(event) => {
-                isPromptComposingRef.current = false
-                const nextPrompt = event.currentTarget.value
-                setPromptDraft(nextPrompt)
-                commitPromptDraft(nextPrompt)
-                updatePromptMentionMenu(nextPrompt, event.currentTarget.selectionStart)
-              }}
-              onKeyDown={(event) => {
-                if (mentionMenuOpen && !isPromptComposingRef.current) {
-                  if (event.key === 'ArrowDown' && filteredPromptMentionOptions.length) {
-                    event.preventDefault()
-                    setMentionSelection((current) => (current + 1) % filteredPromptMentionOptions.length)
-                  } else if (event.key === 'ArrowUp' && filteredPromptMentionOptions.length) {
-                    event.preventDefault()
-                    setMentionSelection((current) => (current - 1 + filteredPromptMentionOptions.length) % filteredPromptMentionOptions.length)
-                  } else if ((event.key === 'Enter' || event.key === 'Tab') && filteredPromptMentionOptions[mentionSelection]) {
-                    event.preventDefault()
-                    insertPromptMention(filteredPromptMentionOptions[mentionSelection])
-                  } else if (event.key === 'Escape') {
-                    event.preventDefault()
-                    setMentionMenuOpen(false)
-                  }
-                }
-                event.stopPropagation()
-              }}
-              onClick={(event) => updatePromptMentionMenu(event.currentTarget.value, event.currentTarget.selectionStart)}
-              onBlur={() => window.setTimeout(() => setMentionMenuOpen(false), 80)}
-              onChange={(event) => {
-                const nextPrompt = event.currentTarget.value
-                setPromptDraft(nextPrompt)
-                if (!isPromptComposingRef.current) {
-                  commitPromptDraft(nextPrompt)
-                  updatePromptMentionMenu(nextPrompt, event.currentTarget.selectionStart)
-                }
-              }}
-            />
-            {isPrompt && mentionMenuOpen && (
-              <div className="prompt-mention-menu nodrag nopan nowheel" role="listbox" aria-label="可引用素材">
-                <div className="prompt-mention-menu-title"><AtSign size={13} /> 引用已连接素材</div>
-                {filteredPromptMentionOptions.length ? filteredPromptMentionOptions.map((option, index) => (
-                  <button
-                    key={`${option.nodeId}-${option.kind}`}
-                    className={`prompt-mention-option ${index === mentionSelection ? 'selected' : ''}`}
-                    type="button"
-                    role="option"
-                    aria-selected={index === mentionSelection}
-                    onPointerDown={(event) => {
-                      event.preventDefault()
-                      event.stopPropagation()
-                      insertPromptMention(option)
-                    }}
-                  >
-                    <span className="prompt-mention-preview" aria-hidden="true">
-                      {option.kind === 'image' && option.previewUrl
-                        ? <img src={option.previewUrl} alt="" draggable={false} />
-                        : <Video size={15} />}
-                    </span>
-                    <span className="prompt-mention-option-copy">
-                      <strong>{option.token}</strong>
-                      <small>{option.label}</small>
-                    </span>
-                    <em>{option.kind === 'image' ? `Image ${option.slotIndex}` : `Video ${option.slotIndex}`}</em>
-                  </button>
-                )) : (
-                  <div className="prompt-mention-empty">
-                    {promptMentionOptions.length ? '没有匹配的素材' : '请先把提示词与参考素材连接到同一个生成框'}
-                  </div>
-                )}
-              </div>
-            )}
-            {isPrompt && visiblePromptMentions.length > 0 && (
-              <div className="prompt-mention-chips" aria-label="提示词已引用素材">
-                {visiblePromptMentions.map((mention) => {
-                  const available = promptMentionOptions.some((option) => option.nodeId === mention.nodeId)
-                  return (
-                    <button
-                      key={`${mention.token}-${mention.nodeId}`}
-                      className={available ? '' : 'missing'}
-                      type="button"
-                      title={available ? `定位 ${mention.label}` : `${mention.label} 未连接到当前生成框`}
-                      onClick={() => data.onLocatePromptMention?.(mention.nodeId)}
-                    >
-                      {mention.kind === 'image' ? <ImageIcon size={11} /> : <Video size={11} />}
-                      {mention.token}
-                      {!available && <AlertTriangle size={11} />}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </label>
-      ) : (
-        data.prompt && <p className="node-prompt">{data.prompt}</p>
-      )}
+      {isOutpaint && promptEditor}
 
       {(isImage || isReference) && (
         data.imageUrl && !isGenerating ? (
-          isReference && data.model3DSceneId ? (
+          isReference && (data.model3DSceneId || data.sketch) ? (
             <button
               className="model3d-reference-preview nodrag nopan nowheel"
               type="button"
-              title="继续编辑这个 3D 场景"
-              aria-label="继续编辑这个 3D 场景"
-              onClick={() => data.onEditModel3D?.(nodeId)}
+              title={data.sketch ? '继续编辑分层手绘' : '继续编辑这个 3D 场景'}
+              aria-label={data.sketch ? '继续编辑分层手绘' : '继续编辑这个 3D 场景'}
+              onClick={() => data.sketch ? data.onEditSketch?.(nodeId) : data.onEditModel3D?.(nodeId)}
             >
               <img
                 className="node-image"
@@ -2942,7 +2835,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                   setReferencePixelSize(`${naturalWidth} × ${naturalHeight}`)
                 }}
               />
-              <span className="model3d-reference-badge"><Box size={13} /> 继续编辑 3D</span>
+              <span className="model3d-reference-badge">{data.sketch ? <><Pencil size={13} /> 继续编辑手绘</> : <><Box size={13} /> 继续编辑 3D</>}</span>
             </button>
           ) : (
             <img
@@ -2950,7 +2843,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               src={data.imageUrl}
               alt={isReference ? (data.sourceName || data.title) : data.title}
               draggable={false}
-              style={isImage ? { aspectRatio: selectedAspectRatio.cssRatio } : undefined}
+              style={isImage ? { aspectRatio: nodeFrameAspectRatio } : undefined}
               onLoad={(event) => {
                 if (!isReference) return
                 const { naturalWidth, naturalHeight } = event.currentTarget
@@ -2962,7 +2855,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
         ) : (
           <div
             className={`node-empty ${isGenerating ? 'generating' : ''}`}
-            style={isImage ? { aspectRatio: selectedAspectRatio.cssRatio } : undefined}
+            style={isImage ? { aspectRatio: nodeFrameAspectRatio } : undefined}
             aria-live="polite"
           >
             {isGenerating ? (
@@ -3006,12 +2899,12 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             controls
             playsInline
             preload="metadata"
-            style={{ aspectRatio: selectedAspectRatio.cssRatio }}
+            style={{ aspectRatio: nodeFrameAspectRatio }}
           />
         ) : (
           <div
             className={`node-empty node-video-empty ${isGenerating ? 'generating' : ''}`}
-            style={{ aspectRatio: selectedAspectRatio.cssRatio }}
+            style={{ aspectRatio: nodeFrameAspectRatio }}
             aria-live="polite"
           >
             {isGenerating ? (
@@ -3023,60 +2916,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               <>
                 <Video size={30} />
                 <span>等待视频</span>
-                <small>连接提示词与参考图后运行</small>
+                <small>在下方填写提示词，可连接参考素材</small>
               </>
             )}
           </div>
         )
-      )}
-
-      {isRepaint && (
-        <>
-          <RepaintMaskEditor
-            sourceImageUrl={data.sourceImageUrl}
-            maskUrl={data.maskUrl}
-            brushSize={brushSize}
-            brushColor={brushColor}
-            size={data.size}
-            aspectRatio={selectedAspectRatio.cssRatio}
-            disabled={isGenerating}
-            onChangeMask={(maskUrl) => data.onChangeMask?.(nodeId, maskUrl)}
-          />
-          <div className="repaint-controls nodrag nopan nowheel">
-            <div className="repaint-color-picker" role="group" aria-label="重绘画笔颜色">
-              <span>颜色</span>
-              <div className="repaint-color-options">
-                {(Object.keys(repaintBrushOptions) as RepaintBrushColor[]).map((color) => (
-                  <button
-                    key={color}
-                    type="button"
-                    className={`repaint-color-swatch ${color} ${brushColor === color ? 'active' : ''}`}
-                    aria-label={`${repaintBrushOptions[color].label}画笔`}
-                    aria-pressed={brushColor === color}
-                    title={`${repaintBrushOptions[color].label}画笔`}
-                    onClick={() => data.onChangeBrushColor?.(nodeId, color)}
-                    disabled={isGenerating}
-                  >
-                    <span />
-                  </button>
-                ))}
-              </div>
-            </div>
-            <label className="repaint-size-control">
-              <span>画笔</span>
-              <UnifiedRange
-                min={10}
-                max={96}
-                value={brushSize}
-                onValueChange={(value) => data.onChangeBrush?.(nodeId, value)}
-              />
-              <em>{brushSize}</em>
-            </label>
-            <button type="button" onClick={() => data.onClearMask?.(nodeId)} disabled={isGenerating || !data.maskUrl}>
-              清除区域
-            </button>
-          </div>
-        </>
       )}
 
       {isOutpaint && (
@@ -3095,104 +2939,20 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
 
       {data.error && <div className="node-error">{data.error}</div>}
 
-      {isImage && usesApiMartNodeSettings && (
-        <div className="image-node-settings nodrag nopan nowheel" aria-label="图像输出设置">
-          <div className="video-resolution-control">
-            <div className="video-setting-heading">
-              <span>输出清晰度</span>
-              <small>{imageModelConfig.label}</small>
-            </div>
-            <div className="video-resolution-options" role="group" aria-label="图像输出清晰度">
-              {imageModelConfig.resolutions.map((imageSize) => (
-                <button
-                  className={selectedImageSize === imageSize ? 'active' : ''}
-                  type="button"
-                  key={imageSize}
-                  aria-pressed={selectedImageSize === imageSize}
-                  onClick={() => data.onChangeImageSize?.(nodeId, imageSize)}
-                  disabled={isGenerating}
-                >
-                  {imageSize}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {isVideo && (
-        <div className="video-node-settings nodrag nopan nowheel" aria-label="视频输出设置">
-          <div className="video-resolution-control">
-            <div className="video-setting-heading">
-              <span>像素大小</span>
-              <small>{videoModelConfig.label}</small>
-            </div>
-            <div className="video-resolution-options" role="group" aria-label="视频像素大小">
-              {videoModelConfig.resolutions.map((resolution) => (
-                <button
-                  className={selectedVideoResolution === resolution ? 'active' : ''}
-                  type="button"
-                  key={resolution}
-                  aria-pressed={selectedVideoResolution === resolution}
-                  onClick={() => data.onChangeVideoResolution?.(nodeId, resolution)}
-                  disabled={isGenerating}
-                >
-                  {resolution}
-                </button>
-              ))}
-            </div>
-          </div>
-          <label className="video-duration-control">
-            <span className="video-setting-heading">
-              <span>生成时长</span>
-              <output>{selectedVideoDuration} 秒</output>
-            </span>
-            <UnifiedRange
-              min={videoModelConfig.minDuration}
-              max={videoModelConfig.maxDuration}
-              step={1}
-              value={selectedVideoDuration}
-              onValueChange={(duration) => data.onChangeVideoDuration?.(nodeId, duration)}
-              disabled={isGenerating}
-              aria-label={`视频生成时长 ${selectedVideoDuration} 秒`}
-            />
-          </label>
-        </div>
-      )}
-
-      {(isImage || isVideo || isRepaint) && (
-        <div className="aspect-ratio-control nodrag nopan" aria-label="尺寸比例">
-          <div className="aspect-ratio-heading">
-            <span>尺寸比例</span>
-            <output>
-              <strong>{selectedAspectRatio.label}</strong>
-              <small>{selectedAspectRatio.size.replace('x', ' × ')}</small>
-            </output>
-          </div>
-          <div className="aspect-ratio-options">
-            <div className="aspect-ratio-marks">
-              {aspectRatioOptions.map((option) => (
-                <button
-                  key={option.value}
-                  className={option.size === selectedAspectRatio.size ? 'active' : ''}
-                  type="button"
-                  title={`${option.label} · ${option.size}`}
-                  aria-label={`选择 ${option.label} 比例`}
-                  aria-pressed={option.size === selectedAspectRatio.size}
-                  onClick={() => data.onChangeSize?.(nodeId, option.size)}
-                >
-                  <i className="ratio-icon" style={{ aspectRatio: option.cssRatio }} />
-                  <span>{option.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {!isPrompt && (
+      {(
         <>
           <div className="node-actions">
+            {mediaDataForCopy(data) && (
+              <button
+                className="nodrag nopan"
+                type="button"
+                title={data.resultCopied ? '已复制，可按 Ctrl+V 粘贴；副本保留提示词' : '复制结果（Ctrl+C），副本会保留提示词'}
+                aria-label={isVideo || isVideoReference ? '复制视频结果' : '复制图像结果'}
+                onClick={() => data.onCopyResult?.(nodeId)}
+              >
+                {data.resultCopied ? <Check size={14} /> : <Copy size={14} />}
+              </button>
+            )}
             {isReference && (
               <>
                 <input
@@ -3253,27 +3013,27 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 <Download size={14} />
               </button>
             )}
-            {(isImage || isRepaint || isOutpaint) && data.imageUrl && (
+            {(isImage || isOutpaint) && data.imageUrl && (
               <button type="button" title="保存并查看所在文件夹" onClick={() => data.onRevealImage?.(nodeId)}>
                 <FolderOpen size={14} />
               </button>
             )}
-            {(isImage || isVideo || isRepaint || isOutpaint) ? (
+            {isOutpaint ? (
               <button
                 className="node-run-button nodrag nopan"
                 type="button"
-                title={isGenerating ? '正在生成' : isVideo ? '运行视频生成' : isRepaint ? '运行重绘' : isOutpaint ? '运行扩图' : '运行生成'}
-                aria-label={isGenerating ? '正在生成' : isVideo ? '运行视频生成' : isRepaint ? '运行重绘' : isOutpaint ? '运行扩图' : '运行生成'}
+                title={isGenerating ? '正在生成' : '运行扩图'}
+                aria-label={isGenerating ? '正在生成' : '运行扩图'}
                 onClick={() => data.onGenerate?.(nodeId)}
                 disabled={isGenerating}
               >
                 Run
               </button>
-            ) : (
+            ) : !isImage && !isVideo && !isRepaint ? (
               <button type="button" title="删除节点" onClick={() => data.onDelete?.(nodeId)}>
                 <Trash2 size={14} />
               </button>
-            )}
+            ) : null}
           </div>
         </>
       )}
@@ -3282,21 +3042,118 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
         type="source"
         position={Position.Right}
         className={`node-handle output-handle ${data.outputConnected ? 'connected' : ''}`}
-        aria-label={isPrompt ? 'Prompt 输出' : isVideo ? 'Video 输出' : 'Image 输出'}
+        aria-label={isVideo || isVideoReference ? 'Video 输出' : 'Image 输出'}
         title={
           isReference
             ? '向右拖出生成图像框'
-            : isVideo
-              ? '视频生成完成后可连接到后续视频节点'
+            : isVideo || isVideoReference
+              ? '连接到视频生成框的 Video 输入'
               : isImage
-              ? '向右拖出重绘生成节点'
-              : isRepaint
-                ? '重绘完成后向右拖出生成图像框'
-                : isOutpaint
+              ? '向右拖出并连接新的图像生成框'
+              : isOutpaint
                   ? '扩图完成后向右拖出生成图像框'
                 : undefined
         }
       />
+    </div>
+    {panelOpen && (
+      <section
+        className="generation-panel floating-prompt-control nodrag nopan nowheel"
+        aria-label={isVideo ? '视频生成面板' : '图像生成面板'}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {promptEditor}
+        <div className={`generation-panel-settings ${isVideo ? 'video-generation-settings' : 'image-generation-toolbar'}`}>
+          <div className="generation-setting generation-model-setting">
+            <span>模型</span>
+            <div
+              ref={modelPickerRef}
+              className={`node-model-picker nodrag nopan nowheel ${isModelMenuOpen ? 'open' : ''}`}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <button
+                className="node-model-select"
+                type="button"
+                aria-label={isVideo ? '视频生成模型' : '图像生成模型'}
+                aria-haspopup="listbox"
+                aria-expanded={isModelMenuOpen}
+                title={isModelMenuOpen ? '收起模型列表' : '展开模型列表'}
+                disabled={isGenerating}
+                onClick={() => setIsModelMenuOpen((open) => !open)}
+              >
+                <span>{selectedModelLabel}</span>
+                <ChevronDown size={14} aria-hidden="true" />
+              </button>
+              {isModelMenuOpen && (
+                <div
+                  className="node-model-menu"
+                  role="listbox"
+                  aria-label={isVideo ? '可选视频模型' : '可选图像模型'}
+                >
+                  {modelOptions.map((model) => {
+                    const isSelectedModel = model.id === selectedModelId
+                    return (
+                      <button
+                        key={model.id}
+                        className={`node-model-option ${isSelectedModel ? 'selected' : ''}`}
+                        type="button"
+                        role="option"
+                        aria-selected={isSelectedModel}
+                        onClick={() => selectNodeModel(model.id)}
+                      >
+                        {model.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+          <label className="generation-setting">
+            <span>画面比例</span>
+            <select aria-label={isVideo ? '视频画面比例' : '图像画面比例'} value={selectedAspectRatio.size} disabled={isGenerating} onChange={(event) => data.onChangeSize?.(nodeId, event.target.value)}>
+              {aspectRatioOptions.map((option) => <option key={option.size} value={option.size}>{option.label}</option>)}
+            </select>
+          </label>
+          <label className="generation-setting">
+            <span>清晰度</span>
+            <select
+              aria-label={isVideo ? '视频像素大小' : '图像输出清晰度'}
+              value={isVideo ? selectedVideoResolution : selectedImageSize}
+              disabled={isGenerating || (!isVideo && imageResolutionOptions.length < 2)}
+              onChange={(event) => isVideo ? data.onChangeVideoResolution?.(nodeId, event.target.value as VideoResolutionTier) : data.onChangeImageSize?.(nodeId, event.target.value as ImageResolutionTier)}
+            >
+              {(isVideo ? videoModelConfig.resolutions : imageResolutionOptions.length ? imageResolutionOptions : [selectedImageSize]).map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
+            </select>
+          </label>
+          {!isVideo && (
+            <button
+              className="generation-submit generation-submit-run"
+              type="button"
+              onClick={() => data.onGenerate?.(nodeId)}
+              disabled={isGenerating}
+              aria-label={isGenerating ? '正在生成' : '运行生成'}
+              title={isGenerating ? '正在生成' : '运行生成'}
+            >
+              {isGenerating ? <Loader2 size={15} className="export-spinner" /> : 'Run'}
+            </button>
+          )}
+        </div>
+        {isVideo && (
+          <div className="generation-panel-footer">
+            <label className="generation-duration-setting">
+              <span>时长 <strong>{selectedVideoDuration} 秒</strong></span>
+              <UnifiedRange min={videoModelConfig.minDuration} max={videoModelConfig.maxDuration} step={1} value={selectedVideoDuration} onValueChange={(duration) => data.onChangeVideoDuration?.(nodeId, duration)} disabled={isGenerating} aria-label={'视频生成时长 ' + selectedVideoDuration + ' 秒'} />
+            </label>
+            <button className="generation-submit" type="button" onClick={() => data.onGenerate?.(nodeId)} disabled={isGenerating} aria-label={isGenerating ? '正在生成' : '运行视频生成'}>
+              {isGenerating ? <Loader2 size={15} className="export-spinner" /> : <Wand2 size={15} />}
+              {isGenerating ? '生成中…' : '生成视频'}
+            </button>
+          </div>
+        )}
+      </section>
+    )}
     </div>
   )
 }
@@ -3373,10 +3230,19 @@ export default function App() {
   const [, setPrompt] = useState(starterPrompt)
   const [projectName, setProjectName] = useState('未命名项目')
   const [dirty, setDirty] = useState(false)
-  const [, setIsGenerating] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [showModelStudio, setShowModelStudio] = useState(false)
+  const [sketchSession, setSketchSession] = useState<{ nodeId: string | null; document?: SketchDocument } | null>(null)
+  const [elementEditSession, setElementEditSession] = useState<{
+    nodeId: string
+    sourceImageUrl: string
+  } | null>(null)
+  const [multiAngleSession, setMultiAngleSession] = useState<{
+    nodeId: string
+    sourceImageUrl: string
+  } | null>(null)
   const [model3DEditSession, setModel3DEditSession] = useState<{
     nodeId: string | null
     sceneId: string | null
@@ -3391,6 +3257,7 @@ export default function App() {
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null)
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<WorkflowNode, Edge> | null>(null)
   const [contextMenu, setContextMenu] = useState<CanvasContextMenu | null>(null)
+  const [mediaClipboard, setMediaClipboard] = useState<CanvasMediaClipboard | null>(null)
   const [groupDialog, setGroupDialog] = useState<GroupDialogState | null>(null)
   const [groupNameDraft, setGroupNameDraft] = useState('')
   const [apiConfig, setApiConfig] = useState<ApiConfig>(() => readStoredApiConfig())
@@ -3419,7 +3286,7 @@ export default function App() {
     if (!apiKey) {
       setChange2ProModels([])
       setChange2ProModelStatus('idle')
-      setChange2ProModelMessage(`请先填写 ${family === 'image2' ? 'Image 2' : 'Nano Banana'} API Key。`)
+      setChange2ProModelMessage(`请先填写 ${family === 'image2' ? 'Image 2.5' : 'Nano Banana'} API Key。`)
       return
     }
 
@@ -3433,11 +3300,11 @@ export default function App() {
       if (change2ProModelRequestIdRef.current !== requestId) return
       const models = availableModels.filter((model) => change2ProModelMatchesFamily(model.id, family))
       if (!models.length) {
-        throw new Error(`当前 Key 没有返回可用的 ${family === 'image2' ? 'Image 2' : 'Nano Banana'} 模型。`)
+        throw new Error(`当前 Key 没有返回可用的 ${family === 'image2' ? 'Image 2.5' : 'Nano Banana'} 模型。`)
       }
       setChange2ProModels(models)
       setChange2ProModelStatus('success')
-      setChange2ProModelMessage(`已从对应 API 读取 ${models.length} 个${family === 'image2' ? ' Image 2' : ' Nano Banana'} 模型。`)
+      setChange2ProModelMessage(`已从对应 API 读取 ${models.length} 个${family === 'image2' ? ' Image 2.5' : ' Nano Banana'} 模型。`)
       setApiConfig((current) => {
         const currentFamily = current.change2ProFamily || change2ProFamilyFromModel(current.model)
         if (current.mode !== 'change2pro' || current.apiKey.trim() !== apiKey || currentFamily !== family) return current
@@ -3458,8 +3325,13 @@ export default function App() {
   }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.model])
 
   useEffect(() => {
-    setEdges((current) => normalizeImageInputEdges(current, nodes))
-  }, [nodes, setEdges])
+    const migrated = migrateLegacyPromptNodes(nodes, edges)
+    if (migrated.nodes !== nodes) {
+      setNodes(migrated.nodes)
+      markDirty()
+    }
+    setEdges(normalizeImageInputEdges(migrated.edges, migrated.nodes))
+  }, [nodes, edges, setNodes, setEdges, markDirty])
 
   useEffect(() => {
     if (!showSettings || apiConfig.mode !== 'change2pro') return
@@ -3499,21 +3371,17 @@ export default function App() {
       const targetsImageInput = isImageInputHandle(connection.targetHandle)
       const targetsVideoInput = isVideoInputHandle(connection.targetHandle)
 
+      if (sourceNode?.data.kind === 'prompt' || connection.targetHandle === 'prompt') {
+        setToast('提示词请直接填写在生成框下方。')
+        return
+      }
       if (targetNode?.data.kind === 'image' || targetNode?.data.kind === 'video' || targetNode?.data.kind === 'repaint' || targetNode?.data.kind === 'outpaint') {
-        if (targetsImageInput && sourceNode?.data.kind === 'prompt') {
-          setToast('提示词节点请连接到 Prompt 输入。')
-          return
-        }
         if (targetsImageInput && sourceNode?.data.kind === 'video-reference') {
           setToast('参考视频请连接到 Video 输入。')
           return
         }
         if (targetsVideoInput && sourceNode?.data.kind !== 'video-reference' && sourceNode?.data.kind !== 'video') {
           setToast('Video 输入仅支持参考视频节点或已生成的视频。')
-          return
-        }
-        if (connection.targetHandle === 'prompt' && sourceNode?.data.kind !== 'prompt') {
-          setToast('参考素材请连接到对应的 Image 或 Video 输入。')
           return
         }
       }
@@ -3591,13 +3459,13 @@ export default function App() {
       const remainingSceneIds = new Set(
         nodes
           .filter((node) => !idsToDelete.has(node.id))
-          .map((node) => node.data.model3DSceneId)
+          .flatMap((node) => [node.data.model3DSceneId, ...sketchSceneIds(node.data.sketch)])
           .filter((sceneId): sceneId is string => Boolean(sceneId)),
       )
       const sceneIdsToDelete = new Set(
         nodes
           .filter((node) => idsToDelete.has(node.id))
-          .map((node) => node.data.model3DSceneId)
+          .flatMap((node) => [node.data.model3DSceneId, ...sketchSceneIds(node.data.sketch)])
           .filter((sceneId): sceneId is string => Boolean(sceneId))
           .filter((sceneId) => !remainingSceneIds.has(sceneId)),
       )
@@ -3606,6 +3474,8 @@ export default function App() {
       setEdges((current) => current.filter((edge) => !idsToDelete.has(edge.source) && !idsToDelete.has(edge.target)))
       setSelectedNodeId((current) => (current && idsToDelete.has(current) ? null : current))
       setLightDirectionNodeId((current) => (current && idsToDelete.has(current) ? null : current))
+      setElementEditSession((current) => (current && idsToDelete.has(current.nodeId) ? null : current))
+      setMultiAngleSession((current) => (current && idsToDelete.has(current.nodeId) ? null : current))
       sceneIdsToDelete.forEach((sceneId) => void deleteModel3DScene(sceneId))
       markDirty()
       setToast(idsToDelete.size > 1 ? `已删除 ${idsToDelete.size} 个画布节点。` : '已删除选中的画布节点。')
@@ -3739,7 +3609,7 @@ export default function App() {
 
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || showModelStudio || groupDialog || historyMediaPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || groupDialog || historyMediaPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -3748,7 +3618,7 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, groupDialog, historyMediaPreview, lightDirectionNodeId, nodes, selectedNodeId, showModelStudio, showSettings],
+    [deleteNodesByIds, elementEditSession, groupDialog, historyMediaPreview, lightDirectionNodeId, multiAngleSession, nodes, selectedNodeId, showModelStudio, sketchSession, showSettings],
   )
 
   useEffect(() => {
@@ -3950,6 +3820,7 @@ export default function App() {
     (nodeId: string, value: string, mentions?: PromptMentionBinding[]) => {
       updateNodeData(nodeId, {
         prompt: value,
+        generationPrompt: value,
         ...(mentions !== undefined ? { promptMentions: mentions } : {}),
       })
     },
@@ -3970,48 +3841,6 @@ export default function App() {
       }, 0)
     },
     [flowInstance, nodes, setNodes],
-  )
-
-  const changeNodeMask = useCallback(
-    (nodeId: string, maskUrl: string) => {
-      updateNodeData(nodeId, { maskUrl })
-    },
-    [updateNodeData],
-  )
-
-  const changeNodeBrush = useCallback(
-    (nodeId: string, brushSize: number) => {
-      updateNodeData(nodeId, { brushSize })
-    },
-    [updateNodeData],
-  )
-
-  const changeNodeBrushColor = useCallback(
-    (nodeId: string, brushColor: RepaintBrushColor) => {
-      setNodes((current) =>
-        current.map((node) =>
-          node.id === nodeId
-            ? {
-                ...node,
-                data: {
-                  ...node.data,
-                  brushColor,
-                  prompt: repaintPromptWithColor(node.data.prompt || '', brushColor),
-                },
-              }
-            : node,
-        ),
-      )
-      markDirty()
-    },
-    [markDirty, setNodes],
-  )
-
-  const clearNodeMask = useCallback(
-    (nodeId: string) => {
-      updateNodeData(nodeId, { maskUrl: undefined })
-    },
-    [updateNodeData],
   )
 
   const changeNodeOutpaintInsets = useCallback(
@@ -4115,74 +3944,7 @@ export default function App() {
           duration: 180,
         })
       }, 0)
-      setToast(
-        sourceNode.data.kind === 'repaint'
-          ? `已创建 ${outputSize} 生成框，重绘结果和提示词已连接。`
-          : `已创建 ${outputSize} 生成框，请连接提示词和参考图后点击生成。`,
-      )
-    },
-    [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes],
-  )
-
-  const createRepaintOutput = useCallback(
-    async (sourceNode: WorkflowNode, dropPosition: XYPosition) => {
-      if (!sourceNode.data.imageUrl) {
-        setToast('请先生成图像，再从右侧拖出重绘节点。')
-        return
-      }
-
-      const outputSize = sourceNode.data.size || apiConfig.size || defaultApiConfig.size
-      const repaintNodeId = id('repaint')
-      const createdAt = new Date().toLocaleString('zh-CN')
-      const releasedY = dropPosition.y - 210
-      const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
-      const position = {
-        x: sourcePosition.x + 410,
-        y: Math.min(Math.max(releasedY, sourcePosition.y - 72), sourcePosition.y + 120),
-      }
-      const repaintNode: WorkflowNode = {
-        id: repaintNodeId,
-        type: 'workflow',
-        position,
-        data: {
-          kind: 'repaint',
-          title: '重绘生成',
-          prompt: repaintPromptWithColor('', 'red'),
-          sourceImageUrl: sourceNode.data.imageUrl,
-          brushSize: 36,
-          brushColor: 'red',
-          status: 'idle',
-          model: apiConfig.model,
-          size: outputSize,
-          createdAt,
-        },
-      }
-
-      setNodes((current) => [...current, repaintNode])
-      setEdges((current) => [
-        ...current,
-        {
-          id: id('edge'),
-          source: sourceNode.id,
-          sourceHandle: 'output',
-          target: repaintNodeId,
-          targetHandle: 'image',
-          animated: true,
-          markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
-          style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
-        },
-      ])
-      setSelectedNodeId(repaintNodeId)
-      markDirty()
-      window.setTimeout(() => {
-        void flowInstance?.fitView({
-          nodes: [{ id: sourceNode.id }, { id: repaintNodeId }],
-          padding: 0.22,
-          maxZoom: 0.95,
-          duration: 180,
-        })
-      }, 0)
-      setToast('已创建重绘节点，涂抹区域并输入提示词后点击重绘生成。')
+      setToast(`已创建 ${outputSize} 生成框，请填写提示词后点击生成。`)
     },
     [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes],
   )
@@ -4196,20 +3958,42 @@ export default function App() {
     [nodes],
   )
 
-  const createRepaintFromNode = useCallback(
-    (nodeId: string) => {
+  const openElementEditFromNode = useCallback(
+    async (nodeId: string) => {
       const sourceNode = nodes.find((item) => item.id === nodeId)
       if (!sourceNode?.data.imageUrl) {
-        setToast('请先上传或生成图片，再进行局部重绘。')
+        setToast('请先上传或生成图片，再进行元素编辑。')
         return
       }
-      const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
-      void createRepaintOutput(sourceNode, {
-        x: sourcePosition.x + 720,
-        y: sourcePosition.y + 230,
-      })
+      try {
+        setToast('正在准备元素编辑画布…')
+        const sourceImageUrl = await imageAsDataUrl(sourceNode.data.imageUrl)
+        setElementEditSession({ nodeId, sourceImageUrl })
+        setToast('可使用智能标记、框选或手绘选择需要修改的元素。')
+      } catch (reason) {
+        setToast(reason instanceof Error ? reason.message : '元素编辑画布打开失败')
+      }
     },
-    [createRepaintOutput, nodes],
+    [nodes],
+  )
+
+  const openMultiAngleFromNode = useCallback(
+    async (nodeId: string) => {
+      const sourceNode = nodes.find((item) => item.id === nodeId)
+      if (!sourceNode?.data.imageUrl) {
+        setToast('请先上传或生成图片，再进行多角度编辑。')
+        return
+      }
+      try {
+        setToast('正在准备多角度编辑器…')
+        const sourceImageUrl = await imageAsDataUrl(sourceNode.data.imageUrl)
+        setMultiAngleSession({ nodeId, sourceImageUrl })
+        setToast('请选择预设，或调整水平环绕、垂直俯仰和景别。')
+      } catch (reason) {
+        setToast(reason instanceof Error ? reason.message : '多角度编辑器打开失败')
+      }
+    },
+    [nodes],
   )
 
   const generateRelitImageFromNode = useCallback(
@@ -4254,7 +4038,7 @@ export default function App() {
         data: {
           kind: 'image',
           title: '灯光调整图像',
-          prompt: '',
+          prompt: relightGenerationPrompt,
           generationPrompt: relightGenerationPrompt,
           status: 'generating',
           model: selectedModel,
@@ -4343,49 +4127,38 @@ export default function App() {
 
   const createInputNodeFromTarget = useCallback(
     (targetNode: WorkflowNode, targetHandleId: string | null, dropPosition: XYPosition) => {
-      const createsPrompt = targetHandleId === 'prompt'
       const createsReference = isImageInputHandle(targetHandleId)
       const createsReferenceVideo = isVideoInputHandle(targetHandleId)
-      if (!createsPrompt && !createsReference && !createsReferenceVideo) return
+      if (!createsReference && !createsReferenceVideo) return
 
       const createdAt = new Date().toLocaleString('zh-CN')
-      const inputNodeId = id(createsPrompt ? 'prompt' : createsReferenceVideo ? 'video-ref' : 'ref')
-      const nodeWidth = createsPrompt ? 330 : 312
+      const inputNodeId = id(createsReferenceVideo ? 'video-ref' : 'ref')
+      const nodeWidth = 312
       const node: WorkflowNode = {
         id: inputNodeId,
         type: 'workflow',
         position: {
           x: dropPosition.x - nodeWidth,
-          y: dropPosition.y - (createsPrompt ? 110 : 150),
+          y: dropPosition.y - 150,
         },
         selected: true,
-        data: createsPrompt
+        data: createsReferenceVideo
           ? {
-              kind: 'prompt',
-              title: '提示词输入框',
-              prompt: '',
+              kind: 'video-reference',
+              title: '参考视频',
               status: 'idle',
-              model: apiConfig.model,
+              model: '上传',
               size: targetNode.data.size || apiConfig.size,
               createdAt,
             }
-          : createsReferenceVideo
-            ? {
-                kind: 'video-reference',
-                title: '参考视频',
-                status: 'idle',
-                model: '上传',
-                size: targetNode.data.size || apiConfig.size,
-                createdAt,
-              }
-            : {
+          : {
               kind: 'reference',
               title: '参考图像',
               status: 'idle',
               model: '上传',
               size: targetNode.data.size || apiConfig.size,
               createdAt,
-              },
+            },
       }
       const edge: Edge = {
         id: id('edge'),
@@ -4406,14 +4179,12 @@ export default function App() {
       setSelectedNodeId(inputNodeId)
       markDirty()
       setToast(
-        createsPrompt
-          ? '已拖出并连接空白提示词节点。'
-          : createsReferenceVideo
-            ? '已拖出并连接空白参考视频节点，请上传视频。'
-            : '已拖出并连接空白参考图节点，请上传图片。',
+        createsReferenceVideo
+          ? '已拖出并连接空白参考视频节点，请上传视频。'
+          : '已拖出并连接空白参考图节点，请上传图片。',
       )
     },
-    [apiConfig.model, apiConfig.size, markDirty, nodes, setEdges, setNodes],
+    [apiConfig.size, markDirty, nodes, setEdges, setNodes],
   )
 
   const handleConnectStart = useCallback<OnConnectStart>((_, params) => {
@@ -4448,13 +4219,6 @@ export default function App() {
         void createReferenceOutput(sourceNode, dropPosition)
       }
       if (sourceNode.data.kind === 'image') {
-        void createRepaintOutput(sourceNode, dropPosition)
-      }
-      if (sourceNode.data.kind === 'repaint') {
-        if (!sourceNode.data.imageUrl) {
-          setToast('请先完成重绘，再从右侧拖出生成图像框。')
-          return
-        }
         void createReferenceOutput(sourceNode, dropPosition)
       }
       if (sourceNode.data.kind === 'outpaint') {
@@ -4465,7 +4229,7 @@ export default function App() {
         void createReferenceOutput(sourceNode, dropPosition)
       }
     },
-    [createInputNodeFromTarget, createReferenceOutput, createRepaintOutput, flowInstance, nodes],
+    [createInputNodeFromTarget, createReferenceOutput, flowInstance, nodes],
   )
 
   const closeContextMenu = useCallback(() => {
@@ -4478,12 +4242,12 @@ export default function App() {
       if (target?.closest('.canvas-context-menu')) return
 
       event.preventDefault()
-      if (target?.closest('.workflow-node, .workflow-group, .react-flow__controls')) return
+      if (target?.closest('.workflow-node-shell, .workflow-node, .workflow-group, .react-flow__controls')) return
 
       const clientPosition = { x: event.clientX, y: event.clientY }
       const menuPosition = {
         x: Math.min(clientPosition.x, window.innerWidth - 210),
-        y: Math.min(clientPosition.y, window.innerHeight - 216),
+        y: Math.min(clientPosition.y, window.innerHeight - 256),
       }
       const flowPosition =
         flowInstance?.screenToFlowPosition(clientPosition, {
@@ -4516,11 +4280,123 @@ export default function App() {
   )
 
   const nodeKindById = new Map(nodes.map((node) => [node.id, node.data.kind]))
+  function ensureGenerationPanelVisible(nodeId: string) {
+    if (!flowInstance) return
+    const element = document.querySelector(`.react-flow__node[data-id="${CSS.escape(nodeId)}"]`)
+    const panel = element?.querySelector('.generation-panel')?.getBoundingClientRect()
+    const card = element?.querySelector('.workflow-node')?.getBoundingClientRect()
+    const canvas = element?.closest('.react-flow')?.getBoundingClientRect()
+    if (!panel || !card || !canvas) return
+    const left = Math.min(card.left, panel.left) - 16
+    const right = Math.max(card.right, panel.right) + 16
+    const top = card.top - 52
+    const bottom = panel.bottom + 84
+    if (left >= canvas.left && right <= canvas.right && top >= canvas.top && bottom <= canvas.bottom) return
+    const zoom = flowInstance.getViewport().zoom
+    const position = flowInstance.screenToFlowPosition({ x: left, y: top })
+    const next = getViewportForBounds({ ...position, width: (right - left) / zoom, height: (bottom - top) / zoom }, canvas.width, canvas.height, 0.12, zoom, 0.04)
+    void flowInstance.setViewport(next, { duration: 180 })
+  }
+
+  const captureSelectedMedia = useCallback((nodeIds?: string[]) => {
+    const selectedIds = collectNodeFamilyIds(nodeIds ?? nodes.filter((node) => node.selected).map((node) => node.id), nodes)
+    return createCanvasMediaClipboard(nodes.filter((node) => selectedIds.has(node.id)).map((node) => ({
+      ...node, position: getAbsoluteNodePosition(node, nodes),
+    })))
+  }, [nodes])
+
+  const copyNodeResults = useCallback(async (nodeIds?: string[]) => {
+    const clipboard = captureSelectedMedia(nodeIds)
+    if (!clipboard) return
+    setMediaClipboard(clipboard)
+    try {
+      await navigator.clipboard.writeText(serializeCanvasMediaClipboard(clipboard))
+    } catch {
+      // The explicit canvas paste command remains available when system clipboard access is blocked.
+    }
+  }, [captureSelectedMedia])
+
+  const pasteNodeResults = useCallback((clipboard: CanvasMediaClipboard, position?: XYPosition) => {
+    const center = flowInstance?.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
+    const origin = position || (center ? { x: center.x - 156, y: center.y - 180 } : { x: 120, y: 140 })
+    const copies: WorkflowNode[] = createPastedMediaNodes(clipboard, origin, () => id('media-copy'), new Date().toLocaleString('zh-CN'))
+    setNodes((current) => {
+      const next: WorkflowNode[] = current.map((node) => ({ ...node, selected: false }))
+      for (const copy of copies) {
+        const freePosition = findFreeWorkflowNodePosition(copy.position, getWorkflowNodeSize(copy), next)
+        next.push({ ...copy, position: freePosition })
+      }
+      return next
+    })
+    setSelectedNodeId(copies.at(-1)?.id || null)
+    setContextMenu(null)
+    markDirty()
+    window.requestAnimationFrame(() => void flowInstance?.fitView({ nodes: copies, padding: 0.3, maxZoom: 1, duration: 240 }))
+  }, [flowInstance, markDirty, setNodes])
+
+  function handleAltMediaDragStart(event: MouseEvent | TouchEvent, node: WorkflowNode, draggedNodes: WorkflowNode[]) {
+    activeAltMediaDrag = null
+    if (!(event instanceof MouseEvent) || !event.altKey || event.button !== 0 || !mediaDataForCopy(node.data)) return
+
+    const clipboard = createCanvasMediaClipboard(draggedNodes.map((item) => ({
+      ...item,
+      position: getAbsoluteNodePosition(item, nodes),
+    })))
+    if (!clipboard?.items.some((item) => item.sourceId === node.id)) return
+
+    activeAltMediaDrag = {
+      anchorNodeId: node.id,
+      anchorStart: getAbsoluteNodePosition(node, nodes),
+      clipboard,
+      sourcePositions: new Map(draggedNodes.map((item) => [item.id, { ...item.position }])),
+    }
+  }
+
+  function handleAltMediaDragStop(_event: MouseEvent | TouchEvent, node: WorkflowNode, draggedNodes: WorkflowNode[]) {
+    const drag = activeAltMediaDrag
+    activeAltMediaDrag = null
+    if (!drag || drag.anchorNodeId !== node.id) return
+
+    const movedById = new Map(draggedNodes.map((item) => [item.id, item]))
+    const movedNodeValues = nodes.map((item) => {
+      const moved = movedById.get(item.id)
+      return moved ? { ...item, position: { ...moved.position } } : item
+    })
+    const movedAnchor = movedNodeValues.find((item) => item.id === drag.anchorNodeId)
+    if (!movedAnchor) return
+
+    const anchorEnd = getAbsoluteNodePosition(movedAnchor, movedNodeValues)
+    const copies: WorkflowNode[] = createDraggedMediaNodes(
+      drag.clipboard,
+      { x: anchorEnd.x - drag.anchorStart.x, y: anchorEnd.y - drag.anchorStart.y },
+      () => id('media-copy'),
+      new Date().toLocaleString('zh-CN'),
+    )
+    if (!copies.length) return
+
+    setNodes((current) => [
+      ...current.map((item) => {
+        const sourcePosition = drag.sourcePositions.get(item.id)
+        return {
+          ...item,
+          ...(sourcePosition ? { position: { ...sourcePosition } } : {}),
+          selected: false,
+        }
+      }),
+      ...copies,
+    ])
+    setSelectedNodeId(copies.at(-1)?.id || null)
+    markDirty()
+    const mediaLabel = copies.every((copy) => copy.data.kind === 'video-reference')
+      ? '视频'
+      : copies.every((copy) => copy.data.kind === 'reference')
+        ? '图像'
+        : '媒体'
+    setToast(`已拖出${copies.length > 1 ? ` ${copies.length} 个` : ''}${mediaLabel}副本，提示词已保留。`)
+  }
+
   const nodesWithActions = nodes.map((node) => {
     const incomingEdges = edges.filter((edge) => edge.target === node.id)
-    const promptInputConnected = incomingEdges.some(
-      (edge) => edge.targetHandle === 'prompt' || (!edge.targetHandle && nodeKindById.get(edge.source) === 'prompt'),
-    )
     const imageInputEdges = incomingEdges.filter(
       (edge) => isImageInputHandle(edge.targetHandle) || (
         !edge.targetHandle &&
@@ -4557,7 +4433,7 @@ export default function App() {
       index: index + 1,
       connected: connectedVideoIndexes.has(index + 1),
     }))
-    const promptMentionOptions = node.data.kind === 'prompt'
+    const promptMentionOptions = node.data.kind === 'image' || node.data.kind === 'video'
       ? promptMentionOptionsForNode(node.id, nodes, edges)
       : undefined
 
@@ -4566,15 +4442,22 @@ export default function App() {
       data: {
         ...node.data,
         apiMode: apiConfig.mode,
+        generationPanelOpen: selectedNodeId === node.id,
+        onEnsureGenerationPanelVisible: ensureGenerationPanelVisible,
+        generationModelOptions: node.data.kind === 'video' ? apiMartVideoModels : apiConfig.mode === 'apimart' ? apiMartModels : apiConfig.mode === 'grsai'
+          ? grsAiModelGroups.flatMap((group) => group.models.map((model) => ({ id: grsAiModelSelectionValue(model), label: model.label })))
+          : apiConfig.mode === 'change2pro' && change2ProModels.length
+            ? change2ProModels.map((model) => ({ id: model.id, label: change2ProModelLabel(model.id) }))
+            : [{ id: apiConfig.model, label: apiModelDisplayName(apiConfig.model) || '本地模拟' }],
+        imageResolutionOptions: apiConfig.mode === 'apimart' ? findApiMartModel(node.data.model || apiConfig.model).resolutions : apiConfig.mode === 'change2pro' && change2ProSupportsImageSize(apiConfig.model) ? change2ProImageSizes : [],
         model: node.data.kind === 'video'
           ? (node.data.model || apiConfig.videoModel)
           : node.data.kind === 'image'
-            ? (node.data.model || apiConfig.model)
+            ? (apiConfig.mode === 'apimart' ? node.data.model || apiConfig.model : apiConfig.model)
             : (node.data.kind === 'repaint' || node.data.kind === 'outpaint')
             ? apiConfig.model
             : node.data.model,
-        imageSize: node.data.kind === 'image' ? (node.data.imageSize || apiConfig.imageSize) : node.data.imageSize,
-        promptInputConnected,
+        imageSize: node.data.kind === 'image' ? (apiConfig.mode === 'apimart' ? node.data.imageSize || apiConfig.imageSize : apiConfig.imageSize) : node.data.imageSize,
         imageInputConnected: imageInputEdges.length > 0,
         imageInputSlots,
         videoInputConnected: videoInputEdges.length > 0,
@@ -4584,25 +4467,28 @@ export default function App() {
         memberCount: node.data.kind === 'group' ? nodes.filter((item) => item.parentId === node.id).length : undefined,
         onDelete: deleteNode,
         onDownload: downloadNodeImage,
+        onCopyResult: (nodeId: string) => void copyNodeResults([nodeId]),
+        resultCopied: mediaClipboard?.items.some((item) => item.sourceId === node.id),
         onRevealImage: (nodeId: string) => void revealNodeImage(nodeId),
         onReplaceImage: replaceReferenceImage,
         onReplaceVideo: (nodeId: string, file: File) => void replaceReferenceVideo(nodeId, file),
         onGenerate: (nodeId: string) => void generateFromNode(nodeId),
-        onChangeImageModel: changeNodeImageModel,
-        onChangeImageSize: changeNodeImageSize,
+        onChangeImageModel: apiConfig.mode === 'apimart' ? changeNodeImageModel : (_nodeId: string, model: string) => updateApiConfig({ model }),
+        onChangeImageSize: apiConfig.mode === 'apimart' ? changeNodeImageSize : (_nodeId: string, imageSize: ImageResolutionTier) => updateApiConfig({ imageSize }),
         onChangeVideoModel: changeNodeVideoModel,
         onChangeSize: changeNodeSize,
         onChangeVideoResolution: changeNodeVideoResolution,
         onChangeVideoDuration: changeNodeVideoDuration,
         onOpenLightDirection: openLightDirectionEditor,
         onEditModel3D: (nodeId: string) => void openModel3DFromNode(nodeId),
-        onCreateRepaint: createRepaintFromNode,
+        onEditSketch: (nodeId: string) => {
+          const source = nodes.find(node => node.id === nodeId)
+          if (source?.data.sketch) setSketchSession({ nodeId, document: source.data.sketch })
+        },
+        onOpenElementEdit: (nodeId: string) => void openElementEditFromNode(nodeId),
+        onOpenMultiAngle: (nodeId: string) => void openMultiAngleFromNode(nodeId),
         onChangePrompt: changeNodePrompt,
         onLocatePromptMention: locatePromptMention,
-        onChangeMask: changeNodeMask,
-        onChangeBrush: changeNodeBrush,
-        onChangeBrushColor: changeNodeBrushColor,
-        onClearMask: clearNodeMask,
         onChangeOutpaintInsets: changeNodeOutpaintInsets,
         onApplyOutpaintPreset: applyNodeOutpaintPreset,
         onResetOutpaintPrompt: resetOutpaintPrompt,
@@ -4624,124 +4510,6 @@ export default function App() {
     [disconnectEdge, edges],
   )
 
-  async function runGeneration(sourcePrompt: string, sourceNodeId?: string) {
-    const trimmed = sourcePrompt.trim()
-    if (!trimmed) {
-      setToast('请先输入提示词。')
-      return
-    }
-
-    setIsGenerating(true)
-    const baseIndex = nodes.length
-    const baseX = 80 + (baseIndex % 2) * 520
-    const baseY = 80 + Math.floor(baseIndex / 2) * 390
-    const sourceNode = sourceNodeId ? nodes.find((item) => item.id === sourceNodeId) : null
-    const sourcePosition = sourceNode ? getAbsoluteNodePosition(sourceNode, nodes) : null
-    const outputSize = sourceNode?.data.size || apiConfig.size || defaultApiConfig.size
-    const configForNode = { ...apiConfig, size: outputSize }
-    const promptNodeId = sourceNodeId ?? id('prompt')
-    const imageNodeId = id('image')
-    const createdAt = new Date().toLocaleString('zh-CN')
-
-    const promptNode: WorkflowNode | null = sourceNodeId
-      ? null
-      : {
-          id: promptNodeId,
-          type: 'workflow',
-          position: { x: baseX, y: baseY },
-          data: {
-            kind: 'prompt',
-            title: '提示词节点',
-            prompt: trimmed,
-            status: 'idle',
-            model: apiConfig.model,
-            size: outputSize,
-            createdAt,
-          },
-        }
-
-    const imageNode: WorkflowNode = {
-      id: imageNodeId,
-      type: 'workflow',
-      position: {
-        x: sourcePosition ? sourcePosition.x + 380 : baseX + 410,
-        y: sourcePosition ? sourcePosition.y : baseY,
-      },
-      data: {
-        kind: 'image',
-        title: 'AI 生成图像',
-        status: 'generating',
-        model: apiConfig.model,
-        imageSize: apiConfig.imageSize,
-        lightDirection: { ...defaultLightDirection },
-        size: outputSize,
-        createdAt,
-      },
-    }
-
-    setNodes((current) => [...current, ...(promptNode ? [promptNode] : []), imageNode])
-    setEdges((current) => [
-      ...current,
-      {
-        id: id('edge'),
-        source: promptNodeId,
-        sourceHandle: 'output',
-        target: imageNodeId,
-        targetHandle: 'prompt',
-        animated: true,
-        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
-        style: { stroke: workflowEdgeColor },
-      },
-    ])
-    setSelectedNodeId(imageNodeId)
-    markDirty()
-
-    try {
-      const referenceSourceNode = sourceNodeId
-        ? edges
-            .filter((edge) => edge.target === sourceNodeId)
-            .map((edge) => nodes.find((item) => item.id === edge.source))
-            .find((item): item is WorkflowNode => item?.data.kind === 'reference' && Boolean(item.data.imageUrl))
-        : null
-      const imageUrl = await requestGeneratedImage(
-        trimmed,
-        configForNode,
-        referenceSourceNode?.data.imageUrl ? [referenceSourceNode.data.imageUrl] : [],
-      )
-      updateNodeData(imageNodeId, { imageUrl, status: 'done', error: undefined })
-      setHistory((current) => [
-        {
-          id: imageNodeId,
-          prompt: trimmed,
-          model: apiConfig.model,
-          size: outputSize,
-          createdAt,
-          imageUrl,
-          status: '成功',
-        },
-        ...current,
-      ])
-      setToast(apiConfig.mode === 'mock' ? '已生成模拟图像。配置 API 后可生成真实图像。' : '图像已生成并加入画布。')
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '生成失败'
-      updateNodeData(imageNodeId, { status: 'error', error: message })
-      setHistory((current) => [
-        {
-          id: imageNodeId,
-          prompt: trimmed,
-          model: apiConfig.model,
-          size: outputSize,
-          createdAt,
-          status: '失败',
-        },
-        ...current,
-      ])
-      setToast(message)
-    } finally {
-      setIsGenerating(false)
-    }
-  }
-
   async function generateImageInNode(nodeId: string) {
     const node = nodes.find((item) => item.id === nodeId)
     if (!node || node.data.kind !== 'image') return
@@ -4756,12 +4524,6 @@ export default function App() {
       .filter(
         (item): item is { edge: Edge; edgeOrder: number; sourceNode: WorkflowNode } => Boolean(item.sourceNode),
       )
-    const promptSourceNode =
-      incomingInputs.find(
-        ({ edge, sourceNode }) => edge.targetHandle === 'prompt' && sourceNode.data.kind === 'prompt' && sourceNode.data.prompt?.trim(),
-      )?.sourceNode ??
-      incomingInputs.find(({ edge, sourceNode }) => !edge.targetHandle && sourceNode.data.kind === 'prompt' && sourceNode.data.prompt?.trim())
-        ?.sourceNode
     const referenceImageSources = incomingInputs
       .filter(
         ({ edge, sourceNode }) =>
@@ -4777,14 +4539,10 @@ export default function App() {
         return left.edgeOrder - right.edgeOrder
       })
     const referenceImageUrls = referenceImageSources.map(({ sourceNode }) => sourceNode.data.imageUrl as string)
-    const trimmed =
-      promptSourceNode?.data.prompt?.trim() ||
-      node.data.prompt?.trim() ||
-      node.data.generationPrompt?.trim() ||
-      ''
+    const trimmed = generationPromptText(node.data)
 
     if (!trimmed) {
-      setToast('请先在连接的提示词输入框里输入提示词。')
+      setToast('请在图像生成框下方填写提示词。')
       return
     }
 
@@ -4808,7 +4566,7 @@ export default function App() {
     try {
       compiledPrompt = compilePromptMentions(
         trimmed,
-        promptSourceNode?.data.promptMentions || node.data.promptMentions || [],
+        node.data.promptMentions || [],
         referenceImageSources.map(({ sourceNode }) => sourceNode.id),
         [],
       )
@@ -4905,13 +4663,6 @@ export default function App() {
       .filter(
         (item): item is { edge: Edge; edgeOrder: number; sourceNode: WorkflowNode } => Boolean(item.sourceNode),
       )
-    const promptSourceNode = incomingSources
-      .find(
-        ({ edge, sourceNode }) =>
-          sourceNode.data.kind === 'prompt' &&
-          sourceNode.data.prompt?.trim() &&
-          (edge.targetHandle === 'prompt' || !edge.targetHandle),
-      )?.sourceNode
     const referenceImageSources = incomingSources
       .filter(
         ({ edge, sourceNode }) =>
@@ -4942,10 +4693,10 @@ export default function App() {
         return left.edgeOrder - right.edgeOrder
       })
     const referenceVideoUrls = referenceVideoSources.map(({ sourceNode }) => sourceNode.data.videoUrl as string)
-    const trimmed = promptSourceNode?.data.prompt?.trim() || node.data.prompt?.trim() || ''
+    const trimmed = generationPromptText(node.data)
 
     if (!trimmed) {
-      updateNodeData(nodeId, { status: 'error', error: '请先连接提示词输入框并填写视频提示词。' })
+      updateNodeData(nodeId, { status: 'error', error: '请在视频生成框下方填写提示词。' })
       return
     }
 
@@ -4986,7 +4737,7 @@ export default function App() {
     try {
       compiledPrompt = compilePromptMentions(
         trimmed,
-        promptSourceNode?.data.promptMentions || node.data.promptMentions || [],
+        node.data.promptMentions || [],
         referenceImageSources.map(({ sourceNode }) => sourceNode.id),
         referenceVideoSources.map(({ sourceNode }) => sourceNode.id),
       )
@@ -5071,114 +4822,88 @@ export default function App() {
     }
   }
 
-  async function generateRepaintInNode(nodeId: string) {
-    const node = nodes.find((item) => item.id === nodeId)
-    if (!node || node.data.kind !== 'repaint') return
-
-    const sourceNodes = edges
-      .filter((edge) => edge.target === nodeId)
-      .map((edge) => nodes.find((item) => item.id === edge.source))
-      .filter((item): item is WorkflowNode => Boolean(item))
-    const imageSourceNode = sourceNodes.find((item) => item.data.kind === 'image' && item.data.imageUrl)
-    const promptSourceNode = sourceNodes.find((item) => item.data.kind === 'prompt' && item.data.prompt?.trim())
-    const sourceImageUrl = imageSourceNode?.data.imageUrl || node.data.sourceImageUrl
-    const maskUrl = node.data.maskUrl
-    const trimmed = promptSourceNode?.data.prompt?.trim() || node.data.prompt?.trim() || ''
-    const brushColor = node.data.brushColor || 'red'
-    const repaintBody = repaintPromptBody(trimmed)
-
-    if (!sourceImageUrl) {
-      updateNodeData(nodeId, { status: 'error', error: '请先从已生成的图像右侧拖出重绘节点。' })
+  async function executeElementEditGeneration(
+    node: WorkflowNode,
+    sourceImageUrl: string,
+    operations: ElementEditOperation[],
+    sourceSize?: string,
+  ) {
+    const nodeId = node.id
+    const validOperations = operations.filter((operation) => operation.maskUrl && operation.prompt.trim())
+    if (!validOperations.length) {
+      updateNodeData(nodeId, { status: 'error', error: '没有可执行的局部标记，请重新打开元素编辑。' })
       return
     }
 
-    if (!maskUrl) {
-      updateNodeData(nodeId, { status: 'error', error: '请先用画笔涂抹需要重绘的区域。' })
-      return
-    }
-
-    if (!repaintBody) {
-      updateNodeData(nodeId, { status: 'error', error: '请输入重绘提示词。' })
-      return
-    }
-
-    const outputSize = node.data.size || imageSourceNode?.data.size || apiConfig.size || defaultApiConfig.size
-    const configForNode = { ...apiConfig, size: outputSize }
+    const requestSize = node.data.elementEditRequestSize || sourceSize || node.data.size || apiConfig.size || defaultApiConfig.size
+    const outputSize = node.data.sourceWidth && node.data.sourceHeight
+      ? `${node.data.sourceWidth}x${node.data.sourceHeight}`
+      : node.data.size || sourceSize || apiConfig.size || defaultApiConfig.size
+    const configForNode = { ...apiConfig, size: requestSize }
     const createdAt = new Date().toLocaleString('zh-CN')
-    const repaintPrompt = repaintPromptWithColor(repaintBody, brushColor)
+    const summaryPrompt = validOperations.map((operation) => `${operation.label}：${operation.prompt.trim()}`).join('\n')
 
     setIsGenerating(true)
     updateNodeData(nodeId, {
       status: 'generating',
       error: undefined,
-      prompt: repaintPrompt,
-      brushColor,
+      prompt: summaryPrompt,
+      elementEditOperations: validOperations,
+      elementEditRequestSize: requestSize,
       model: apiConfig.model,
       size: outputSize,
     })
 
     try {
-      const coloredMaskUrl = await recolorRepaintMask(maskUrl, brushColor)
-      const generatedImageUrl = await requestGeneratedImage(repaintPrompt, configForNode, [sourceImageUrl, coloredMaskUrl])
-      const imageUrl = await compositeRepaintResult(sourceImageUrl, generatedImageUrl, coloredMaskUrl)
+      let workingImageUrl = sourceImageUrl
+      for (let index = 0; index < validOperations.length; index += 1) {
+        const operation = validOperations[index]
+        setToast(`正在处理 ${operation.label}（${index + 1}/${validOperations.length}）…`)
+        const coloredMaskUrl = await recolorRepaintMask(operation.maskUrl, 'blue')
+        const stepPrompt = repaintPromptWithColor(
+          `${operation.label}附近的局部修改：${operation.prompt.trim()}。只处理蓝色蒙版覆盖范围，保持其它区域的内容、构图、光影和细节不变。`,
+          'blue',
+        )
+        const referenceImageUrl = await imageAsDataUrl(workingImageUrl)
+        const generatedImageUrl = await requestGeneratedImage(stepPrompt, configForNode, [referenceImageUrl, coloredMaskUrl])
+        workingImageUrl = await compositeRepaintResult(workingImageUrl, generatedImageUrl, coloredMaskUrl)
+      }
+
       updateNodeData(nodeId, {
-        imageUrl,
+        imageUrl: workingImageUrl,
         sourceImageUrl,
         status: 'done',
         error: undefined,
+        prompt: summaryPrompt,
+        elementEditOperations: validOperations,
+        elementEditRequestSize: requestSize,
         model: apiConfig.model,
         size: outputSize,
       })
       setHistory((current) => [
         {
           id: nodeId,
-          prompt: repaintPrompt,
+          prompt: summaryPrompt,
           model: apiConfig.model,
           size: outputSize,
           createdAt,
-          imageUrl,
+          imageUrl: workingImageUrl,
           status: '成功',
         },
         ...current,
       ])
-      const completedRepaintNode: WorkflowNode = {
-        ...node,
-        data: {
-          ...node.data,
-          prompt: repaintPrompt,
-          imageUrl,
-          sourceImageUrl,
-          brushColor,
-          status: 'done',
-          error: undefined,
-          model: apiConfig.model,
-          size: outputSize,
-        },
-      }
-      await createReferenceOutput(
-        completedRepaintNode,
-        { x: node.position.x + 380, y: node.position.y + 180 },
-        {
-          prompt: repaintPrompt,
-          imageUrl,
-          status: 'done',
-          error: undefined,
-          model: apiConfig.model,
-          size: outputSize,
-        },
-      )
       setToast(
         apiConfig.mode === 'mock'
-          ? `已生成 ${outputSize} 重绘模拟图，并自动连接到右侧图像框。`
-          : `已生成 ${outputSize} 重绘图像，并自动连接到右侧图像框。`,
+          ? `已按 ${validOperations.length} 处局部描述生成模拟结果，结果已写入新图片节点。`
+          : `已按 ${validOperations.length} 处局部描述完成元素编辑，结果已写入新图片节点。`,
       )
     } catch (error) {
-      const message = error instanceof Error ? error.message : '重绘生成失败'
+      const message = error instanceof Error ? error.message : '元素编辑生成失败'
       updateNodeData(nodeId, { status: 'error', error: message })
       setHistory((current) => [
         {
           id: nodeId,
-          prompt: trimmed,
+          prompt: summaryPrompt,
           model: apiConfig.model,
           size: outputSize,
           createdAt,
@@ -5192,6 +4917,234 @@ export default function App() {
     }
   }
 
+  async function submitElementEdit(result: ElementEditResult) {
+    const session = elementEditSession
+    if (!session) return
+    const sourceNode = nodes.find((item) => item.id === session.nodeId)
+    if (!sourceNode?.data.imageUrl) throw new Error('原图已不在画布中，请重新打开元素编辑。')
+
+    const sourceWidth = Math.max(1, Math.round(result.sourceWidth))
+    const sourceHeight = Math.max(1, Math.round(result.sourceHeight))
+    const outputSize = `${sourceWidth}x${sourceHeight}`
+    const requestSize = nearestAspectRatioOption(sourceWidth, sourceHeight).size
+    const resultNodeId = id('element-edit-result')
+    const createdAt = new Date().toLocaleString('zh-CN')
+    const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
+    const position = {
+      x: sourcePosition.x + 410,
+      y: sourcePosition.y + 36,
+    }
+    const resultNode: WorkflowNode = {
+      id: resultNodeId,
+      type: 'workflow',
+      position,
+      data: {
+        kind: 'image',
+        title: '元素编辑结果',
+        prompt: result.prompt,
+        sourceImageUrl: sourceNode.data.imageUrl,
+        maskUrl: result.maskUrl,
+        elementEditOperations: result.operations,
+        elementEditRequestSize: requestSize,
+        sourceWidth,
+        sourceHeight,
+        status: 'generating',
+        model: apiConfig.model,
+        imageSize: apiConfig.imageSize,
+        lightDirection: { ...defaultLightDirection },
+        size: outputSize,
+        createdAt,
+      },
+    }
+
+    setNodes((current) => [...current.map((item) => ({ ...item, selected: false })), { ...resultNode, selected: true }])
+    setEdges((current) => normalizeImageInputEdges([
+      ...current,
+      {
+        id: id('edge'),
+        source: sourceNode.id,
+        sourceHandle: 'output',
+        target: resultNodeId,
+        targetHandle: `${imageInputHandlePrefix}1`,
+        animated: true,
+        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+        style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
+      },
+    ], [...nodes, resultNode]))
+    setSelectedNodeId(resultNodeId)
+    setElementEditSession(null)
+    markDirty()
+    setToast(`已创建并连接结果图片节点，正在处理 ${result.operations.length} 处局部描述…`)
+    window.setTimeout(() => {
+      void flowInstance?.fitView({
+        nodes: [{ id: sourceNode.id }, { id: resultNodeId }],
+        padding: 0.2,
+        maxZoom: 0.92,
+        duration: 180,
+      })
+    }, 0)
+    void executeElementEditGeneration(resultNode, sourceNode.data.imageUrl, result.operations, requestSize)
+  }
+
+  async function executeMultiAngleGeneration(
+    node: WorkflowNode,
+    sourceImageUrl: string,
+    result: MultiAngleResult,
+  ) {
+    const nodeId = node.id
+    const outputSize = `${result.sourceWidth}x${result.sourceHeight}`
+    const requestSize = nearestAspectRatioOption(result.sourceWidth, result.sourceHeight).size
+    const configForNode = {
+      ...apiConfig,
+      model: node.data.model || apiConfig.model,
+      imageSize: node.data.imageSize || apiConfig.imageSize,
+      size: requestSize,
+    }
+    const createdAt = new Date().toLocaleString('zh-CN')
+
+    setIsGenerating(true)
+    updateNodeData(nodeId, {
+      status: 'generating',
+      error: undefined,
+      prompt: result.prompt,
+      generationPrompt: result.prompt,
+      multiAngleSettings: result,
+      sourceWidth: result.sourceWidth,
+      sourceHeight: result.sourceHeight,
+      size: outputSize,
+    })
+
+    try {
+      const generatedImageUrl = await requestGeneratedImage(result.prompt, configForNode, [sourceImageUrl])
+      const imageUrl = await fitImageToExactSize(generatedImageUrl, result.sourceWidth, result.sourceHeight)
+      updateNodeData(nodeId, {
+        imageUrl,
+        sourceImageUrl,
+        status: 'done',
+        error: undefined,
+        prompt: result.prompt,
+        generationPrompt: result.prompt,
+        multiAngleSettings: result,
+        model: configForNode.model,
+        imageSize: configForNode.imageSize,
+        sourceWidth: result.sourceWidth,
+        sourceHeight: result.sourceHeight,
+        size: outputSize,
+      })
+      setHistory((current) => [
+        {
+          id: nodeId,
+          prompt: result.prompt,
+          model: configForNode.model,
+          size: outputSize,
+          createdAt,
+          imageUrl,
+          status: '成功',
+        },
+        ...current,
+      ])
+      setToast(
+        apiConfig.mode === 'mock'
+          ? `已生成“${result.presetLabel}”模拟结果，并保持 ${result.sourceWidth} × ${result.sourceHeight}px。`
+          : `“${result.presetLabel}”生成完成，并保持 ${result.sourceWidth} × ${result.sourceHeight}px。`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '多角度画面生成失败'
+      updateNodeData(nodeId, { status: 'error', error: message })
+      setHistory((current) => [
+        {
+          id: nodeId,
+          prompt: result.prompt,
+          model: configForNode.model,
+          size: outputSize,
+          createdAt,
+          status: '失败',
+        },
+        ...current,
+      ])
+      setToast(message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  async function submitMultiAngle(result: MultiAngleResult) {
+    const session = multiAngleSession
+    if (!session) return
+    const sourceNode = nodes.find((item) => item.id === session.nodeId)
+    if (!sourceNode?.data.imageUrl) throw new Error('原图已不在画布中，请重新打开多角度编辑器。')
+
+    const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
+    const outputSize = `${result.sourceWidth}x${result.sourceHeight}`
+    const imageModel = apiConfig.mode === 'apimart'
+      ? findApiMartModel(sourceNode.data.kind === 'image' ? sourceNode.data.model || apiConfig.model : apiConfig.model)
+      : null
+    const selectedModel = imageModel?.id || apiConfig.model
+    const imageSize = imageModel
+      ? (sourceNode.data.imageSize && imageModel.resolutions.includes(sourceNode.data.imageSize)
+          ? sourceNode.data.imageSize
+          : imageModel.defaultResolution)
+      : apiConfig.imageSize
+    const resultNodeId = id('multi-angle-result')
+    const resultNode: WorkflowNode = {
+      id: resultNodeId,
+      type: 'workflow',
+      position: findFreeWorkflowNodePosition(
+        { x: sourcePosition.x + 430, y: sourcePosition.y + 20 },
+        { width: 330, height: 500 },
+        nodes,
+      ),
+      selected: true,
+      data: {
+        kind: 'image',
+        title: '多角度结果',
+        prompt: result.prompt,
+        generationPrompt: result.prompt,
+        sourceImageUrl: sourceNode.data.imageUrl,
+        multiAngleSettings: result,
+        sourceWidth: result.sourceWidth,
+        sourceHeight: result.sourceHeight,
+        status: 'generating',
+        model: selectedModel,
+        imageSize,
+        lightDirection: { ...defaultLightDirection },
+        size: outputSize,
+        createdAt: new Date().toLocaleString('zh-CN'),
+      },
+    }
+
+    setNodes((current) => [
+      ...current.map((item) => ({ ...item, selected: false })),
+      resultNode,
+    ])
+    setEdges((current) => normalizeImageInputEdges([
+      ...current,
+      {
+        id: id('edge'),
+        source: sourceNode.id,
+        sourceHandle: 'output',
+        target: resultNodeId,
+        targetHandle: `${imageInputHandlePrefix}1`,
+        animated: true,
+        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+        style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
+      },
+    ], [...nodes, resultNode]))
+    setSelectedNodeId(resultNodeId)
+    setMultiAngleSession(null)
+    markDirty()
+    setToast(`已创建并连接“${result.presetLabel}”结果节点，正在生成…`)
+    window.setTimeout(() => {
+      void flowInstance?.fitView({
+        nodes: [{ id: sourceNode.id }, { id: resultNodeId }],
+        padding: 0.2,
+        maxZoom: 0.92,
+        duration: 180,
+      })
+    }, 0)
+    void executeMultiAngleGeneration(resultNode, session.sourceImageUrl, result)
+  }
+
   async function generateOutpaintInNode(nodeId: string) {
     const node = nodes.find((item) => item.id === nodeId)
     if (!node || node.data.kind !== 'outpaint') return
@@ -5201,12 +5154,11 @@ export default function App() {
       .map((edge) => nodes.find((item) => item.id === edge.source))
       .filter((item): item is WorkflowNode => Boolean(item))
     const imageSourceNode = sourceNodes.find((item) => item.data.kind !== 'prompt' && item.data.imageUrl)
-    const promptSourceNode = sourceNodes.find((item) => item.data.kind === 'prompt' && item.data.prompt?.trim())
     const sourceImageUrl = imageSourceNode?.data.imageUrl || node.data.sourceImageUrl
     let sourceWidth = node.data.sourceWidth || 1024
     let sourceHeight = node.data.sourceHeight || 1024
     let outpaintInsets = node.data.outpaintInsets || defaultOutpaintInsets(sourceWidth, sourceHeight)
-    const trimmed = promptSourceNode?.data.prompt?.trim() || node.data.prompt?.trim() || defaultOutpaintPrompt
+    const trimmed = node.data.prompt?.trim() || defaultOutpaintPrompt
 
     if (!sourceImageUrl) {
       updateNodeData(nodeId, { status: 'error', error: '请先连接一张需要扩展的图像到 Image 输入。' })
@@ -5332,44 +5284,10 @@ export default function App() {
       void generateVideoInNode(node.id)
       return
     }
-    if (node?.data.kind === 'repaint') {
-      void generateRepaintInNode(node.id)
-      return
-    }
     if (node?.data.kind === 'outpaint') {
       void generateOutpaintInNode(node.id)
       return
     }
-    if (node?.data.prompt) {
-      void runGeneration(node.data.prompt, node.id)
-    }
-  }
-
-  function addPromptInputNodeAt(position: XYPosition) {
-    const node: WorkflowNode = {
-      id: id('prompt'),
-      type: 'workflow',
-      position,
-      data: {
-        kind: 'prompt',
-        title: '提示词输入框',
-        prompt: '',
-        status: 'idle',
-        model: apiConfig.model,
-        size: apiConfig.size,
-        createdAt: new Date().toLocaleString('zh-CN'),
-      },
-    }
-    setNodes((current) => [...current, node])
-    setSelectedNodeId(node.id)
-    markDirty()
-    setToast('已在画布中添加提示词输入框。')
-  }
-
-  function addPromptInputFromMenu() {
-    if (!contextMenu) return
-    addPromptInputNodeAt(contextMenu.flowPosition)
-    closeContextMenu()
   }
 
   function addImageGenerationNodeAt(position: XYPosition) {
@@ -5442,7 +5360,6 @@ export default function App() {
     ) ?? { x: 720, y: 460 }
     const createdAt = new Date().toLocaleString('zh-CN')
     const referenceNodeId = id('ref')
-    const promptNodeId = id('prompt')
     const outputNodeId = id(options.outputKind)
     const referenceNode: WorkflowNode = {
       id: referenceNodeId,
@@ -5460,20 +5377,6 @@ export default function App() {
         createdAt,
       },
     }
-    const promptNode: WorkflowNode = {
-      id: promptNodeId,
-      type: 'workflow',
-      position: { x: canvasCenter.x - 560, y: canvasCenter.y + 100 },
-      data: {
-        kind: 'prompt',
-        title: '提示词输入框',
-        prompt: options.initialPrompt || '',
-        status: 'idle',
-        model: apiConfig.model,
-        size: apiConfig.size || defaultApiConfig.size,
-        createdAt,
-      },
-    }
     const outputNode: WorkflowNode = {
       id: outputNodeId,
       type: 'workflow',
@@ -5482,7 +5385,7 @@ export default function App() {
       data: {
         kind: options.outputKind,
         title: options.outputKind === 'video' ? 'AI 视频生成' : 'AI 生成图像',
-        prompt: '',
+        prompt: options.initialPrompt || '',
         status: 'idle',
         model: options.outputKind === 'video' ? apiConfig.videoModel : apiConfig.model,
         imageSize: options.outputKind === 'image' ? apiConfig.imageSize : undefined,
@@ -5508,22 +5411,11 @@ export default function App() {
         markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
         style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
       },
-      {
-        id: id('edge'),
-        source: promptNodeId,
-        sourceHandle: 'output',
-        target: outputNodeId,
-        targetHandle: 'prompt',
-        animated: true,
-        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
-        style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
-      },
     ]
 
     setNodes((current) => [
       ...current.map((node) => ({ ...node, selected: false })),
       referenceNode,
-      promptNode,
       outputNode,
     ])
     setEdges((current) => [...current, ...workflowEdges])
@@ -5534,7 +5426,7 @@ export default function App() {
     setToast(options.toastMessage)
     window.setTimeout(() => {
       void flowInstance?.fitView({
-        nodes: [{ id: referenceNodeId }, { id: promptNodeId }, { id: outputNodeId }],
+        nodes: [{ id: referenceNodeId }, { id: outputNodeId }],
         padding: 0.18,
         maxZoom: 0.92,
         duration: 240,
@@ -5908,12 +5800,31 @@ export default function App() {
   }
 
   useEffect(() => {
+    const ignoreClipboardEvent = (event: ClipboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      return event.defaultPrevented || Boolean(target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) ||
+        Boolean(showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || showHistoryPanel || historyMediaPreview || groupDialog || lightDirectionNodeId)
+    }
+    const handleCopyMedia = (event: ClipboardEvent) => {
+      if (ignoreClipboardEvent(event) || window.getSelection()?.toString()) return
+      const clipboard = captureSelectedMedia()
+      if (!clipboard || !event.clipboardData) return
+      const serialized = serializeCanvasMediaClipboard(clipboard)
+      event.clipboardData.setData(canvasMediaClipboardType, serialized)
+      event.clipboardData.setData('text/plain', serialized)
+      event.preventDefault()
+      setMediaClipboard(clipboard)
+    }
     const handlePasteImage = (event: ClipboardEvent) => {
-      const target = event.target instanceof HTMLElement ? event.target : null
-      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
-      if (showSettings || showModelStudio || showHistoryPanel || historyMediaPreview || groupDialog) return
+      if (ignoreClipboardEvent(event)) return
 
       const clipboardData = event.clipboardData
+      const copiedMedia = parseCanvasMediaClipboard(clipboardData?.getData(canvasMediaClipboardType) || clipboardData?.getData('text/plain') || '')
+      if (copiedMedia) {
+        event.preventDefault()
+        pasteNodeResults(copiedMedia, contextMenu?.flowPosition)
+        return
+      }
       const itemFile = Array.from(clipboardData?.items || [])
         .find((item) => item.kind === 'file' && item.type.startsWith('image/'))
         ?.getAsFile()
@@ -5959,24 +5870,111 @@ export default function App() {
         .catch((error) => setToast(error instanceof Error ? error.message : '粘贴图片失败，请重新复制。'))
     }
 
+    window.addEventListener('copy', handleCopyMedia)
     window.addEventListener('paste', handlePasteImage)
-    return () => window.removeEventListener('paste', handlePasteImage)
+    return () => {
+      window.removeEventListener('copy', handleCopyMedia)
+      window.removeEventListener('paste', handlePasteImage)
+    }
   }, [
     apiConfig.size,
+    captureSelectedMedia,
+    contextMenu,
+    elementEditSession,
     flowInstance,
     groupDialog,
     historyMediaPreview,
+    lightDirectionNodeId,
     markDirty,
+    multiAngleSession,
     nodes.length,
     setNodes,
+    pasteNodeResults,
     showHistoryPanel,
     showModelStudio,
+    sketchSession,
     showSettings,
   ])
 
   function openNewModel3DStudio() {
     setModel3DEditSession({ nodeId: null, sceneId: null, scene: null })
     setShowModelStudio(true)
+  }
+
+  const sketchModels: SketchModelOption[] = apiConfig.mode === 'apimart'
+    ? apiMartModels
+    : [{ id: apiConfig.model, label: apiConfig.mode === 'mock' ? '本地模拟（不调用 API）' : apiModelDisplayName(apiConfig.model), resolutions: [apiConfig.mode === 'mock' ? '1K' : apiConfig.imageSize] }]
+
+  async function saveSketchToCanvas(result: { document: SketchDocument; imageUrl: string }, generate: boolean) {
+    if (generate && apiConfig.mode !== 'mock' && !apiConfig.apiKey.trim()) throw new Error('请先在 API 设置中填写密钥。')
+    // Persist image assets locally; the editable elements remain structured project data.
+    const imageUrl = await cacheCanvasImage(result.imageUrl)
+    const sketch: SketchDocument = {
+      ...result.document,
+      layers: await Promise.all(result.document.layers.map(async layer => ({
+        ...layer,
+        imageUrl: layer.imageUrl?.startsWith('data:') ? await cacheCanvasImage(layer.imageUrl) : layer.imageUrl,
+      }))),
+    }
+    const source = nodes.find(node => node.id === sketchSession?.nodeId)
+    const sourceId = source?.id || id('ref')
+    const createdAt = new Date().toLocaleString('zh-CN')
+    const size = `${sketch.width}x${sketch.height}`
+    const referenceSize = { width: 312, height: Math.ceil(288 * sketch.height / sketch.width + 120) }
+    const outputNodeSize = { width: 330, height: Math.ceil(306 * sketch.height / sketch.width + 450) }
+    const center = flowInstance?.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 }) || { x: 200, y: 180 }
+    const position = source ? getAbsoluteNodePosition(source, nodes) : findFreeWorkflowNodePosition({ x: center.x - 156, y: center.y - 180 }, referenceSize, nodes)
+    const sourceData: WorkflowNodeData = { ...(source?.data || {}), kind: 'reference', title: '分层手绘参考图', sourceName: '分层手绘参考图.png', status: 'done', model: '手绘画板', size, sketch, imageUrl, createdAt }
+    const reference: WorkflowNode = source ? { ...source, selected: !generate, data: sourceData } : { id: sourceId, type: 'workflow', position, selected: !generate, data: sourceData }
+    const referenceFootprint = { ...reference, measured: referenceSize }
+    const outputId = id('image')
+    const generationPrompt = `${sketchGenerationInstruction}\n\n用户要求：\n${sketch.prompt.trim()}`
+    const config: ApiConfig = { ...apiConfig, model: sketch.model, imageSize: sketch.imageSize, size }
+    const baseNodes = nodes.filter(node => node.id !== sourceId)
+    const extras: WorkflowNode[] = []
+    if (generate) {
+      const outputPosition = findFreeWorkflowNodePosition({ x: position.x + 500, y: position.y + 50 }, outputNodeSize, [...baseNodes, referenceFootprint])
+      extras.push({ id: outputId, type: 'workflow', position: outputPosition, selected: true, data: { kind: 'image', title: '手绘生成图像', model: sketch.model, imageSize: sketch.imageSize, size, prompt: generationPrompt, generationPrompt, status: 'generating', createdAt } })
+    }
+    setNodes(current => [...current.filter(node => node.id !== sourceId).map(node => ({ ...node, selected: false })), reference, ...extras])
+    if (generate) setEdges(current => [...current, ...[
+      { source: sourceId, targetHandle: `${imageInputHandlePrefix}1` },
+    ].map(input => ({ id: id('edge'), ...input, sourceHandle: 'output', target: outputId, animated: true, markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor }, style: { stroke: workflowEdgeColor } }))])
+    setSketchSession(null)
+    setSelectedNodeId(generate ? outputId : sourceId)
+    markDirty()
+    setToast(generate ? '已保存分层手绘，正在按草稿生成图像。' : '手绘已保存，点击参考图可继续编辑；保存项目 ZIP 可保留全部图层和模型。')
+    // Wait for newly mounted nodes (including portrait previews) to be measured.
+    // Fitting the old, empty graph can otherwise leave the new workflow off-screen.
+    const focusNodes = [{ id: sourceId }, ...extras.map(node => ({ id: node.id }))]
+    let previousMeasurements = ''
+    function focusSketchWorkflow(attempt = 0) {
+      if (!flowInstance) return
+      const measured = focusNodes.map(node => flowInstance.getNode(node.id)?.measured)
+      const ready = measured.every(size => size?.width && size.height)
+      const signature = JSON.stringify(measured)
+      if (ready && signature === previousMeasurements) {
+        void flowInstance.fitView({ nodes: focusNodes, padding: 0.22, maxZoom: 0.9, duration: 200 })
+      } else if (attempt < 30) {
+        previousMeasurements = signature
+        window.setTimeout(() => focusSketchWorkflow(attempt + 1), 50)
+      }
+    }
+    window.setTimeout(() => focusSketchWorkflow(), 50)
+    if (!generate) return
+    setIsGenerating(true)
+    void (async () => {
+      try {
+        const generatedImage = await requestGeneratedImage(generationPrompt, config, [imageUrl])
+        updateNodeData(outputId, { imageUrl: generatedImage, status: 'done', error: undefined })
+        setHistory(current => [{ id: outputId, prompt: generationPrompt, model: sketch.model, size, createdAt, imageUrl: generatedImage, status: '成功' }, ...current])
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : '手绘图像生成失败'
+        updateNodeData(outputId, { status: 'error', error: message })
+        setHistory(current => [{ id: outputId, prompt: generationPrompt, model: sketch.model, size, createdAt, status: '失败' }, ...current])
+        setToast(message)
+      } finally { setIsGenerating(false) }
+    })()
   }
 
   async function openModel3DFromNode(nodeId: string) {
@@ -6081,16 +6079,21 @@ export default function App() {
 
     const reader = new FileReader()
     reader.onload = () => {
-      const previousSceneId = nodes.find((node) => node.id === nodeId)?.data.model3DSceneId
+      const previous = nodes.find((node) => node.id === nodeId)
+      const previousSceneIds = [previous?.data.model3DSceneId, ...sketchSceneIds(previous?.data.sketch)]
+      const remainingSceneIds = new Set(nodes.filter(node => node.id !== nodeId).flatMap(node => [node.data.model3DSceneId, ...sketchSceneIds(node.data.sketch)]))
       updateNodeData(nodeId, {
         imageUrl: String(reader.result),
         model3DSceneId: undefined,
+        sketch: undefined,
         sourceName: file.name,
         status: 'done',
         error: undefined,
         createdAt: new Date().toLocaleString('zh-CN'),
       })
-      if (previousSceneId) void deleteModel3DScene(previousSceneId)
+      for (const sceneId of previousSceneIds) {
+        if (sceneId && !remainingSceneIds.has(sceneId)) void deleteModel3DScene(sceneId)
+      }
       setToast(`已替换参考图：${file.name}`)
     }
     reader.onerror = () => setToast('替换失败，请重新选择图片。')
@@ -6187,7 +6190,7 @@ export default function App() {
   function switchChange2ProFamily(family: Change2ProApiFamily) {
     setChange2ProModels([])
     setChange2ProModelStatus('idle')
-    setChange2ProModelMessage(`已切换到 ${family === 'image2' ? 'Image 2' : 'Nano Banana'} API 配置。`)
+    setChange2ProModelMessage(`已切换到 ${family === 'image2' ? 'Image 2.5' : 'Nano Banana'} API 配置。`)
 
     setApiConfig((current) => {
       const currentFamily = current.change2ProFamily || change2ProFamilyFromModel(current.model)
@@ -6231,6 +6234,12 @@ export default function App() {
     selectedCanvasNodes.every((node) => !node.parentId && node.data.kind !== 'group')
   const lightDirectionNode = lightDirectionNodeId
     ? nodes.find((node) => node.id === lightDirectionNodeId) ?? null
+    : null
+  const elementEditNode = elementEditSession
+    ? nodes.find((node) => node.id === elementEditSession.nodeId) ?? null
+    : null
+  const multiAngleNode = multiAngleSession
+    ? nodes.find((node) => node.id === multiAngleSession.nodeId) ?? null
     : null
 
   return (
@@ -6316,9 +6325,10 @@ export default function App() {
             onConnectStart={handleConnectStart}
             onConnectEnd={handleConnectEnd}
             onInit={setFlowInstance}
+            onNodeDragStart={handleAltMediaDragStart}
+            onNodeDragStop={handleAltMediaDragStop}
             onNodeClick={(_, node) => {
-              const selectionId = node.parentId ?? node.id
-              setSelectedNodeId(selectionId)
+              setSelectedNodeId(node.id)
               if (node.parentId) {
                 setNodes((current) =>
                   current.map((item) => ({ ...item, selected: item.id === node.parentId })),
@@ -6355,11 +6365,22 @@ export default function App() {
               <div className="selection-toolbar-summary">
                 <strong>已选 {selectedCanvasNodes.length} 项</strong>
                 <span>
-                  {selectedCanvasNodes.some((node) => node.data.kind === 'group')
+                  {selectedCanvasNodes.some((node) => mediaDataForCopy(node.data))
+                    ? '按 Alt + 鼠标左键拖动可创建副本'
+                    : selectedCanvasNodes.some((node) => node.data.kind === 'group')
                     ? '拖动分组可整体移动'
                     : '拖动任一节点可同步移动'}
                 </span>
               </div>
+              <button
+                type="button"
+                onClick={() => void copyNodeResults()}
+                disabled={!captureSelectedMedia()}
+                title="复制选中的图片或视频结果（Ctrl+C）"
+              >
+                <Copy size={14} />
+                复制结果
+              </button>
               <button
                 type="button"
                 onClick={openCreateGroupDialog}
@@ -6408,10 +6429,6 @@ export default function App() {
               <button type="button" onClick={uploadReferenceVideoFromMenu}>
                 <Video size={15} />
                 上传参考视频
-              </button>
-              <button type="button" onClick={addPromptInputFromMenu}>
-                <Wand2 size={15} />
-                添加提示词输入框
               </button>
               <button type="button" onClick={addImageGenerationFromMenu}>
                 <ImageIcon size={15} />
@@ -6578,6 +6595,12 @@ export default function App() {
             >
               <Box size={15} />
               3D 模型
+            </SpecularButton>
+          </div>
+          <div className="sketch-left-popover">
+            <SpecularButton className={`prompt-library-toggle ${sketchSession ? 'active' : ''}`} size="md" radius={8} tint="#ffffff" tintOpacity={0} blur={0} textColor="#f5f5f5" lineColor="#ffffff" baseColor="#525252" intensity={0.8} shineSize={11} shineFade={31} thickness={1.3} speed={0.3} proximity={50} followMouse autoAnimate={false}
+              onClick={() => { setShowQuickWorkflows(false); setShowPromptLibrary(false); setSketchSession({ nodeId: null }) }} title="打开分层手绘画板" aria-label="打开分层手绘画板">
+              <Pencil size={15} />手绘画板
             </SpecularButton>
           </div>
           <div className={`history-popover ${showHistoryPanel ? 'expanded' : ''}`}>
@@ -6838,6 +6861,36 @@ export default function App() {
         </div>
       )}
 
+      {elementEditSession && elementEditNode && (
+        <Suspense fallback={<div className="modal-backdrop" role="status">正在加载元素编辑器…</div>}>
+          <ElementEditStudio
+            sourceImageUrl={elementEditSession.sourceImageUrl}
+            sourceName={elementEditNode.data.sourceName || elementEditNode.data.title}
+            modelLabel={apiModelDisplayName(apiConfig.model) || '当前图像模型'}
+            busy={isGenerating}
+            onClose={() => setElementEditSession(null)}
+            onGenerate={submitElementEdit}
+          />
+        </Suspense>
+      )}
+
+      {multiAngleSession && multiAngleNode && (
+        <Suspense fallback={<div className="modal-backdrop" role="status">正在加载多角度编辑器…</div>}>
+          <MultiAngleStudio
+            sourceImageUrl={multiAngleSession.sourceImageUrl}
+            sourceName={multiAngleNode.data.sourceName || multiAngleNode.data.title}
+            busy={isGenerating}
+            onClose={() => setMultiAngleSession(null)}
+            onGenerate={submitMultiAngle}
+          />
+        </Suspense>
+      )}
+
+      {sketchSession && (
+        <Suspense fallback={<div className="modal-backdrop" role="status">正在加载手绘画板…</div>}>
+          <SketchStudio initialDocument={sketchSession.document} defaultModel={apiConfig.model} defaultResolution={apiConfig.imageSize} models={sketchModels} apiReady={apiConfig.mode === 'mock' || Boolean(apiConfig.apiKey.trim())} onComplete={saveSketchToCanvas} onCancel={() => setSketchSession(null)} />
+        </Suspense>
+      )}
       {showModelStudio && (
         <Suspense
           fallback={(
@@ -6905,7 +6958,7 @@ export default function App() {
                         aria-pressed={(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2'}
                         onClick={() => switchChange2ProFamily('image2')}
                       >
-                        <strong>Image 2</strong>
+                        <strong>Image 2.5</strong>
                         <small>独立 API</small>
                       </button>
                       <button
@@ -6979,7 +7032,7 @@ export default function App() {
                 <label className="field wide">
                   <span>
                     API Key
-                    {apiConfig.mode === 'change2pro' && ` · ${(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2' ? 'Image 2' : 'Nano Banana'}`}
+                    {apiConfig.mode === 'change2pro' && ` · ${(apiConfig.change2ProFamily || change2ProFamilyFromModel(apiConfig.model)) === 'image2' ? 'Image 2.5' : 'Nano Banana'}`}
                   </span>
                   <input
                     type="password"

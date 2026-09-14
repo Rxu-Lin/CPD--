@@ -1,50 +1,52 @@
-# API 模式下拉框视觉检查
-
-- Source visual truth: `C:\Users\Administrator\AppData\Local\Temp\codex-clipboard-47be2ffe-f4ef-4845-b0e8-49a945f135a5.png`
-- Implementation screenshot: `D:\Codex-CPD无限画布网站\AI网站开发\api-mode-implementation.png`
-- Focused comparison: `D:\Codex-CPD无限画布网站\AI网站开发\api-mode-comparison.png`
-- Browser viewport: 1969 × 1272 CSS px
-- Source pixels: 506 × 274 px
-- Implementation modal capture: 720 × 437 px at device scale 1
-- Focused comparison normalization: implementation control crop 242 × 170 px, scaled to 390 × 274 px beside the 506 × 274 px source
-- State: API 设置窗口打开，模式菜单展开，本地模拟为当前选项
-
-## Full-view comparison evidence
-
-`api-mode-implementation.png` shows the complete API settings dialog. The custom menu remains inside the dialog layout, all four options are visible, and the footer is not covered or clipped.
-
-## Focused region comparison evidence
-
-`api-mode-comparison.png` places the supplied source and the rendered mode control together. The implementation replaces the browser-native gray popup with a deeper `#0b1016` menu, uses the API modal's strong border token, preserves the existing cyan focus ring, and uses a restrained dark selected row.
-
-## Required fidelity surfaces
-
-- Fonts and typography: Existing application font, size, weight, line height, and single-line labels are preserved. No wrapping or truncation is visible.
-- Spacing and layout rhythm: The control keeps the existing field height and radius. The expanded menu uses 4 px inset padding, 2 px row gaps, and pushes the modal layout instead of overlapping its footer.
-- Colors and visual tokens: Menu border uses `var(--line-strong)`. The menu background is intentionally darker than the API modal while keeping foreground contrast and the existing accent focus state.
-- Image quality and asset fidelity: No new raster or decorative assets are required for this control. The existing Lucide chevron/check icons render sharply.
-- Copy and content: All four API mode labels match the existing application copy.
-
-## Comparison history
-
-- First rendered pass — P2: the absolutely positioned menu was clipped by the modal's scroll boundary in the shorter local-simulation state.
-- Fix: changed the menu to participate in layout flow so the modal expands while the menu is open.
-- Post-fix evidence: `api-mode-implementation.png` shows the complete four-option menu and unobstructed footer; `api-mode-comparison.png` confirms the requested darker palette and matching border treatment.
-
-## Interaction and runtime checks
-
-- Opened the API settings dialog.
-- Expanded the API mode control and verified four visible options.
-- Selected the current option and verified the menu automatically collapsed.
-- Lint and production build passed.
-- Browser console check found only the local Vite HMR WebSocket reconnect warning; no application runtime error was introduced.
+# 多角度编辑器角度区域 Design QA
 
 ## Findings
 
-No actionable P0, P1, or P2 differences remain for the requested color and border adjustment.
+- 无 P0 / P1 / P2 问题。
+- P3（可接受）：参考图用青色圆点标识相机位置；实现使用现有图标库的摄像机图标和青色状态块，信息更明确，符合本轮需求。
+- P3（有意差异）：参考图区域为中性灰；实现改为产品现有的深蓝黑表面色，以统一其他功能框。
 
-## Follow-up polish
+## 对照证据
 
-No required P3 changes.
+- source visual truth path: 当前任务的 Browser 批注截图，页面 `http://127.0.0.1:5174/`；批注意图为“默认在中心，移动时图标始终向上”。
+- 补充稳定参考：`multi-angle-orbit-reference.png`。
+- implementation screenshot path: Codex in-app Browser transient capture, tab 1, `http://127.0.0.1:5174/`（浏览器内截图已检查；当前浏览器不提供截图文件导出）。
+- viewport: 1936 × 1272 capture；devicePixelRatio 1.5。
+- state: 用户真实图片 `1200 × 2132px`，多角度编辑器打开，自定义预设，水平 0° / 90°、垂直 0° / 40°、中景。
+- full-view comparison evidence: 默认中心状态与水平 90° 状态均完成全弹窗截图检查，弹窗布局、颜色和其他控件没有变化。
+- focused region comparison evidence: 通过角度区域 DOM 几何值对照摄像机与参考图的位置和 transform，避免仅凭截图判断旋转。
+
+## Fidelity Surfaces
+
+- 字体与层级：沿用应用现有系统字体、字号和字重；摄像机标记为图形信息，不引入额外文字噪音。
+- 间距与布局：参考图固定在网格中心；网格、摄像机、四向控制保持清晰层级，放大后的球体比例接近参考画面。
+- 色彩与视觉令牌：弹窗、预设、角度区域、参数卡统一使用应用的 `surface`、`surface-2`、`line`、`accent` 色彩令牌。
+- 图像质量与资产：参考图片使用真实上传内容；摄像机使用项目现有 Lucide 图标，不使用文本符号或临时代替图形。
+- 文案与内容：保留原有视角、角度、景别、原尺寸和自动连接说明。
+
+## 交互与状态测试
+
+- 默认 0° / 0°：摄像机中心与参考图片中心重合。
+- 水平角度从 0° 调至 90°：参考图位置变化 `x=0, y=0`；摄像机移动 `x=142px, y=0`；摄像机 transform 前后均为 `matrix(1, 0, 0, 1, -14.5, -14.5)`，没有旋转。
+- 垂直角度从 0° 调至 40°：摄像机移动到新的球面位置，transform 仍完全一致，图标保持向上；参考图仍固定。
+- 用户原有的 `-1° / 0°` 参数在测试后已恢复。
+- 摄像机位置提供可访问描述，实时包含水平与垂直角度。
+- 当前交互没有新增 `MultiAngleStudio` 控制台错误；日志中仅保留 Vite 热更新期间的历史 React Flow 提示及已恢复的旧 App 热更新错误。
+
+## Comparison History
+
+- 初次实现问题：参考图跟随水平、垂直、景别和倾斜预设移动、缩放或旋转；角度区域使用独立灰色调；仅有圆点，没有摄像机图标。
+- 第二轮批注问题：摄像机默认位于球体顶部，而且图标随轨迹发生旋转。
+- 修复：摄像机球面投影改为 0° / 0° 对应中心；移除动态图标旋转，仅保留固定居中位移。
+- 修复后证据：默认状态与 90° / 40° 状态均在 in-app Browser 中检查；参考图 DOM 几何位置完全一致，摄像机按参数移动且 transform 始终不变。
+
+## Implementation Checklist
+
+- [x] 参考图固定
+- [x] 球形网格随水平和俯仰参数旋转
+- [x] 摄像机图标随参数移动，但始终保持向上且不旋转
+- [x] 色调与其他功能框一致
+- [x] 桌面视口无溢出或遮挡
+- [x] 构建、代码检查和现有测试通过
 
 final result: passed
