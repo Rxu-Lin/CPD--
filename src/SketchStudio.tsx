@@ -345,7 +345,7 @@ export default function SketchStudio({ initialDocument, defaultModel, defaultRes
             </section>
           </aside>
         </div>
-        <footer className="sketch-footer"><div role={error ? 'alert' : 'status'} className={error ? 'sketch-error' : 'sketch-help'}>{error || (busy ? '正在处理，请稍候…' : '图层独立保存 · 关闭窗口会保存编辑 · 项目请通过顶部保存按钮保存为 ZIP')}</div><div><button type="button" disabled={busy} onClick={() => void finish(false)}><Save size={15} />保存到画布</button><button type="button" className="sketch-generate" disabled={busy} onClick={() => void finish(true)}>{busy ? <Loader2 size={15} className="export-spinner" /> : <Wand2 size={15} />}生成图像</button></div></footer>
+        <footer className="sketch-footer"><div role={error ? 'alert' : 'status'} className={error ? 'sketch-error' : 'sketch-help'}>{error || (busy ? '正在处理，请稍候…' : '图层独立保存 · 关闭窗口会保存编辑 · 项目请通过顶部保存按钮保存为 ZIP')}</div><div><button type="button" disabled={busy} onClick={() => void finish(false)}><Save size={15} />保存到画布</button><button type="button" className="sketch-generate" aria-label={busy ? '正在处理' : 'Run 生成图像'} title="Run 生成图像" disabled={busy} onClick={() => void finish(true)}>{busy ? <Loader2 size={15} className="export-spinner" /> : 'Run'}</button></div></footer>
       </section>
       {modelEditor && <div className="sketch-model-overlay"><Suspense fallback={<div className="sketch-loading" role="status"><Loader2 size={22} />正在载入 3D 编辑器…</div>}><Model3DStudio
         initialScene={modelEditor.scene}

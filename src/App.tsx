@@ -65,7 +65,6 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
-import SpecularButton from './SpecularButton'
 import UnifiedRange from './UnifiedRange'
 import './App.css'
 import { generationPromptText, migrateLegacyPromptNodes } from './workflowPrompts'
@@ -89,7 +88,7 @@ import {
 } from './model3dSceneStore'
 import { sketchGenerationInstruction, sketchSceneIds, type SketchDocument, type SketchModelOption } from './sketchDocument'
 import type { ElementEditOperation, ElementEditResult } from './ElementEditStudio'
-import type { MultiAngleResult } from './MultiAngleStudio'
+import type { MultiAngleModelOption, MultiAngleResult } from './MultiAngleStudio'
 
 const Model3DStudio = lazy(() => import('./Model3DStudio'))
 const SketchStudio = lazy(() => import('./SketchStudio'))
@@ -1421,7 +1420,7 @@ async function buildPackageProject(
         items.push(item)
         continue
       }
-      const cacheKey = `${item.source.fileName}\n${item.source.url}`
+      const cacheKey = item.source.url
       let packagedUrl = modelAssetCache.get(cacheKey)
       if (!packagedUrl) {
         modelIndex += 1
@@ -3271,6 +3270,16 @@ export default function App() {
   const [openedProjectFileName, setOpenedProjectFileName] = useState('')
   const [, setToast] = useState('已准备好，默认使用本地模拟生成。')
 
+  const imageGenerationModelOptions = useMemo<MultiAngleModelOption[]>(() => (
+    apiConfig.mode === 'apimart'
+      ? apiMartModels.map(({ id: modelId, label }) => ({ id: modelId, label }))
+      : apiConfig.mode === 'grsai'
+        ? grsAiModelGroups.flatMap((group) => group.models.map((model) => ({ id: grsAiModelSelectionValue(model), label: model.label })))
+        : apiConfig.mode === 'change2pro' && change2ProModels.length
+          ? change2ProModels.map((model) => ({ id: model.id, label: change2ProModelLabel(model.id) }))
+          : [{ id: apiConfig.model, label: apiModelDisplayName(apiConfig.model) || '本地模拟' }]
+  ), [apiConfig.mode, apiConfig.model, change2ProModels])
+
   const markDirty = useCallback(() => setDirty(true), [])
 
   useEffect(() => {
@@ -3334,7 +3343,7 @@ export default function App() {
   }, [nodes, edges, setNodes, setEdges, markDirty])
 
   useEffect(() => {
-    if (!showSettings || apiConfig.mode !== 'change2pro') return
+    if ((!showSettings && !multiAngleSession) || apiConfig.mode !== 'change2pro') return
     if (apiConfig.apiKey.trim().length < 8) {
       setChange2ProModels([])
       setChange2ProModelStatus('idle')
@@ -3346,7 +3355,7 @@ export default function App() {
       void loadChange2ProModels()
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.mode, loadChange2ProModels, showSettings])
+  }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.mode, loadChange2ProModels, multiAngleSession, showSettings])
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<WorkflowNode>[]) => {
@@ -4444,11 +4453,7 @@ export default function App() {
         apiMode: apiConfig.mode,
         generationPanelOpen: selectedNodeId === node.id,
         onEnsureGenerationPanelVisible: ensureGenerationPanelVisible,
-        generationModelOptions: node.data.kind === 'video' ? apiMartVideoModels : apiConfig.mode === 'apimart' ? apiMartModels : apiConfig.mode === 'grsai'
-          ? grsAiModelGroups.flatMap((group) => group.models.map((model) => ({ id: grsAiModelSelectionValue(model), label: model.label })))
-          : apiConfig.mode === 'change2pro' && change2ProModels.length
-            ? change2ProModels.map((model) => ({ id: model.id, label: change2ProModelLabel(model.id) }))
-            : [{ id: apiConfig.model, label: apiModelDisplayName(apiConfig.model) || '本地模拟' }],
+        generationModelOptions: node.data.kind === 'video' ? apiMartVideoModels : imageGenerationModelOptions,
         imageResolutionOptions: apiConfig.mode === 'apimart' ? findApiMartModel(node.data.model || apiConfig.model).resolutions : apiConfig.mode === 'change2pro' && change2ProSupportsImageSize(apiConfig.model) ? change2ProImageSizes : [],
         model: node.data.kind === 'video'
           ? (node.data.model || apiConfig.videoModel)
@@ -5076,10 +5081,12 @@ export default function App() {
 
     const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
     const outputSize = `${result.sourceWidth}x${result.sourceHeight}`
+    const chosenModel = imageGenerationModelOptions.find((model) => model.id === result.modelId)
+    if (!chosenModel) throw new Error('所选生图模型已不可用，请重新选择。')
     const imageModel = apiConfig.mode === 'apimart'
-      ? findApiMartModel(sourceNode.data.kind === 'image' ? sourceNode.data.model || apiConfig.model : apiConfig.model)
+      ? findApiMartModel(chosenModel.id)
       : null
-    const selectedModel = imageModel?.id || apiConfig.model
+    const selectedModel = imageModel?.id || chosenModel.id
     const imageSize = imageModel
       ? (sourceNode.data.imageSize && imageModel.resolutions.includes(sourceNode.data.imageSize)
           ? sourceNode.data.imageSize
@@ -5133,7 +5140,7 @@ export default function App() {
     setSelectedNodeId(resultNodeId)
     setMultiAngleSession(null)
     markDirty()
-    setToast(`已创建并连接“${result.presetLabel}”结果节点，正在生成…`)
+    setToast(`已创建并连接“${result.presetLabel}”结果节点，正在使用 ${result.modelLabel} 生成…`)
     window.setTimeout(() => {
       void flowInstance?.fitView({
         nodes: [{ id: sourceNode.id }, { id: resultNodeId }],
@@ -6445,35 +6452,22 @@ export default function App() {
             </div>
           )}
           <div className="quick-workflow-popover">
-            <SpecularButton
-              className={`prompt-library-toggle ${showQuickWorkflows ? 'active' : ''}`}
-              size="md"
-              radius={8}
-              tint="#ffffff"
-              tintOpacity={0}
-              blur={0}
-              textColor="#f5f5f5"
-              lineColor="#ffffff"
-              baseColor="#525252"
-              intensity={0.8}
-              shineSize={11}
-              shineFade={31}
-              thickness={1.3}
-              speed={0.3}
-              proximity={50}
-              followMouse
-              autoAnimate={false}
-              onClick={() => {
-                setShowQuickWorkflows((current) => !current)
-                setShowPromptLibrary(false)
-              }}
-              title="快捷工作流"
-              aria-expanded={showQuickWorkflows}
-              aria-controls="quick-workflow-panel"
-            >
-              <WorkflowIcon size={15} />
-              快捷工作流
-            </SpecularButton>
+            <span className="canvas-tool-trigger">
+              <button
+                type="button"
+                className="prompt-library-toggle"
+                onClick={() => {
+                  setShowQuickWorkflows((current) => !current)
+                  setShowPromptLibrary(false)
+                }}
+                title="快捷工作流"
+                aria-expanded={showQuickWorkflows}
+                aria-controls="quick-workflow-panel"
+              >
+                <WorkflowIcon size={15} />
+                快捷工作流
+              </button>
+            </span>
             {showQuickWorkflows && (
               <section id="quick-workflow-panel" className="quick-workflow-panel" aria-label="快捷工作流">
                 <div className="prompt-library-head">
@@ -6501,35 +6495,22 @@ export default function App() {
             )}
           </div>
           <div className="prompt-library-popover">
-            <SpecularButton
-              className={`prompt-library-toggle ${showPromptLibrary ? 'active' : ''}`}
-              size="md"
-              radius={8}
-              tint="#ffffff"
-              tintOpacity={0}
-              blur={0}
-              textColor="#f5f5f5"
-              lineColor="#ffffff"
-              baseColor="#525252"
-              intensity={0.8}
-              shineSize={11}
-              shineFade={31}
-              thickness={1.3}
-              speed={0.3}
-              proximity={50}
-              followMouse
-              autoAnimate={false}
-              onClick={() => {
-                setShowPromptLibrary((current) => !current)
-                setShowQuickWorkflows(false)
-              }}
-              title="常用提示词"
-              aria-expanded={showPromptLibrary}
-              aria-controls="prompt-library-panel"
-            >
-              <BookOpen size={15} />
-              提示词
-            </SpecularButton>
+            <span className="canvas-tool-trigger">
+              <button
+                type="button"
+                className="prompt-library-toggle"
+                onClick={() => {
+                  setShowPromptLibrary((current) => !current)
+                  setShowQuickWorkflows(false)
+                }}
+                title="常用提示词"
+                aria-expanded={showPromptLibrary}
+                aria-controls="prompt-library-panel"
+              >
+                <BookOpen size={15} />
+                提示词
+              </button>
+            </span>
             {showPromptLibrary && (
               <section id="prompt-library-panel" className="prompt-library-panel" aria-label="提示词库">
                 <div className="prompt-library-head">
@@ -6567,41 +6548,30 @@ export default function App() {
             )}
           </div>
           <div className="model3d-left-popover">
-            <SpecularButton
-              className={`prompt-library-toggle ${showModelStudio ? 'active' : ''}`}
-              size="md"
-              radius={8}
-              tint="#ffffff"
-              tintOpacity={0}
-              blur={0}
-              textColor="#f5f5f5"
-              lineColor="#ffffff"
-              baseColor="#525252"
-              intensity={0.8}
-              shineSize={11}
-              shineFade={31}
-              thickness={1.3}
-              speed={0.3}
-              proximity={50}
-              followMouse
-              autoAnimate={false}
-              onClick={() => {
-                setShowQuickWorkflows(false)
-                setShowPromptLibrary(false)
-                openNewModel3DStudio()
-              }}
-              title="打开 3D 模型预览"
-              aria-label="打开 3D 模型预览"
-            >
-              <Box size={15} />
-              3D 模型
-            </SpecularButton>
+            <span className="canvas-tool-trigger">
+              <button
+                type="button"
+                className="prompt-library-toggle"
+                onClick={() => {
+                  setShowQuickWorkflows(false)
+                  setShowPromptLibrary(false)
+                  openNewModel3DStudio()
+                }}
+                title="打开 3D 模型预览"
+                aria-label="打开 3D 模型预览"
+              >
+                <Box size={15} />
+                3D 模型
+              </button>
+            </span>
           </div>
           <div className="sketch-left-popover">
-            <SpecularButton className={`prompt-library-toggle ${sketchSession ? 'active' : ''}`} size="md" radius={8} tint="#ffffff" tintOpacity={0} blur={0} textColor="#f5f5f5" lineColor="#ffffff" baseColor="#525252" intensity={0.8} shineSize={11} shineFade={31} thickness={1.3} speed={0.3} proximity={50} followMouse autoAnimate={false}
-              onClick={() => { setShowQuickWorkflows(false); setShowPromptLibrary(false); setSketchSession({ nodeId: null }) }} title="打开分层手绘画板" aria-label="打开分层手绘画板">
-              <Pencil size={15} />手绘画板
-            </SpecularButton>
+            <span className="canvas-tool-trigger">
+              <button type="button" className="prompt-library-toggle"
+                onClick={() => { setShowQuickWorkflows(false); setShowPromptLibrary(false); setSketchSession({ nodeId: null }) }} title="打开分层手绘画板" aria-label="打开分层手绘画板">
+                <Pencil size={15} />手绘画板
+              </button>
+            </span>
           </div>
           <div className={`history-popover ${showHistoryPanel ? 'expanded' : ''}`}>
             <button
@@ -6879,6 +6849,9 @@ export default function App() {
           <MultiAngleStudio
             sourceImageUrl={multiAngleSession.sourceImageUrl}
             sourceName={multiAngleNode.data.sourceName || multiAngleNode.data.title}
+            models={imageGenerationModelOptions}
+            initialModelId={multiAngleNode.data.model || apiConfig.model}
+            modelsLoading={apiConfig.mode === 'change2pro' && change2ProModelStatus === 'loading'}
             busy={isGenerating}
             onClose={() => setMultiAngleSession(null)}
             onGenerate={submitMultiAngle}

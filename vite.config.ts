@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin, type ViteDevServer } from 'vite'
 import react from '@vitejs/plugin-react'
+import { model3DAssetsPlugin } from './server/model3dPlugin.ts'
 import { ZipArchive, type ArchiverError } from 'archiver'
 import { Open as ZipOpen } from 'unzipper'
 import { execFileSync, spawn } from 'node:child_process'
@@ -259,6 +260,7 @@ function mediaTypeFromFilePath(filePath: string) {
   const extension = path.extname(filePath).toLowerCase()
   if (extension === '.obj') return 'text/plain; charset=utf-8'
   if (extension === '.fbx') return 'application/octet-stream'
+  if (extension === '.glb') return 'model/gltf-binary'
   if (extension === '.svg') return 'image/svg+xml'
   if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
   if (extension === '.webp') return 'image/webp'
@@ -2407,7 +2409,7 @@ function localImageLibraryPlugin(): Plugin {
           const sessionId = validateSessionId(body.sessionId || '')
           if (!body.sourceUrl || !body.fileName) throw new Error('缺少 3D 模型资源')
           const extension = path.extname(body.fileName).toLowerCase()
-          if (!['.obj', '.fbx'].includes(extension)) throw new Error('项目包仅支持 OBJ 或 FBX 模型资源')
+          if (!['.obj', '.fbx', '.glb'].includes(extension)) throw new Error('项目包仅支持 OBJ、FBX 或 GLB 模型资源')
           const sessionRoot = path.join(projectPackagesTempDir, sessionId)
           await readFile(path.join(sessionRoot, '.active'), 'utf8')
 
@@ -2597,7 +2599,7 @@ function localImageLibraryPlugin(): Plugin {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), localImageLibraryPlugin()],
+  plugins: [react(), model3DAssetsPlugin(), localImageLibraryPlugin()],
   server: {
     watch: {
       ignored: [

@@ -2378,11 +2378,13 @@
   top: calc(50% + 86px);
 }
 
-.prompt-library-toggle {
+.canvas-tool-trigger > .prompt-library-toggle {
   display: inline-flex;
   width: 108px;
+  height: 34px;
   min-height: 34px;
   flex: 0 0 auto;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: center;
   gap: 7px;
@@ -2391,8 +2393,11 @@
   background: #121820;
   color: #dbe4ec;
   cursor: pointer;
-  padding: 0 10px;
-  font-size: 12px;
+  padding: 0 9px;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1;
+  white-space: nowrap;
   box-shadow:
     0 0 0 1px rgba(142, 155, 170, 0.12) inset,
     0 12px 28px rgba(0, 0, 0, 0.22),
@@ -2400,44 +2405,47 @@
   backdrop-filter: blur(14px);
 }
 
-.specular-button.prompt-library-toggle {
-  height: 34px;
-  min-height: 34px;
-  padding: 0 9px;
-  font-size: 11px;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.quick-workflow-popover .prompt-library-toggle {
-  font-size: 10px;
-}
-
-.prompt-library-toggle .specular-button__label {
-  flex-wrap: nowrap;
-  white-space: nowrap;
-}
-
-.prompt-library-toggle .specular-button__label > svg {
+.prompt-library-toggle > svg {
   flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
 }
 
-.prompt-library-toggle.active {
-  background: #121820;
-  color: #f3f8fb;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.16) inset,
-    0 12px 28px rgba(0, 0, 0, 0.22),
-    0 1px 0 rgba(255, 255, 255, 0.05) inset;
+.prompt-library-toggle:focus-visible {
+  outline: 2px solid #91a4b8;
+  outline-offset: 3px;
 }
 
-.prompt-library-toggle:hover {
-  background: #121820;
-  color: #f3f8fb;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.16) inset,
-    0 12px 28px rgba(0, 0, 0, 0.22),
-    0 1px 0 rgba(255, 255, 255, 0.05) inset;
+/* Reserve the full slide distance so edge hovering and adjacent panels stay stable. */
+.canvas-tool-trigger {
+  display: flex;
+  flex: 0 0 118px;
+  width: 118px;
+  align-items: center;
+}
+
+.canvas-tool-trigger > .prompt-library-toggle {
+  translate: 0 0;
+  transition: translate 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .canvas-tool-trigger:hover > .prompt-library-toggle {
+    translate: 10px 0;
+  }
+}
+
+.canvas-tool-trigger > .prompt-library-toggle:focus-visible {
+  translate: 10px 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-tool-trigger > .prompt-library-toggle,
+  .canvas-tool-trigger:hover > .prompt-library-toggle,
+  .canvas-tool-trigger > .prompt-library-toggle:focus-visible {
+    translate: none;
+    transition: none;
+  }
 }
 
 .prompt-library-panel {

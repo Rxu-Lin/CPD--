@@ -31,8 +31,12 @@ export type SavedTransform = {
 
 export type SavedModel3DSource = {
   fileName: string
-  format: 'OBJ' | 'FBX'
+  format: 'OBJ' | 'FBX' | 'GLB'
   url: string
+  byteLength?: number
+  loadMs?: number
+  localCoordinates?: boolean
+  optimization?: { originalBytes: number; originalTriangles: number; triangles: number; originalLoadMs?: number; ratio: number }
 }
 
 export type SavedModel3DItem = {

@@ -11,6 +11,7 @@
 }
 
 .model3d-studio {
+  position: relative;
   display: grid;
   width: min(1800px, calc(100vw - 48px));
   height: min(1120px, calc(100dvh - 48px));
@@ -25,6 +26,26 @@
     0 1px 0 rgba(255, 255, 255, 0.045) inset;
   animation: model3d-studio-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
 }
+
+.model3d-optimization p, .model3d-optimize-dialog p { color: var(--muted); font-size: 11px; line-height: 1.6; margin: 0; }
+.model3d-optimization small { display: block; color: var(--faint); font-size: 11px; line-height: 1.6; }
+.model3d-optimize-tabs { display: flex; gap: 6px; margin: 10px 0; }
+.model3d-optimize-tabs button { flex: 1; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: #0d131b; color: var(--muted); font-size: 11px; cursor: pointer; }
+.model3d-optimize-tabs button[aria-pressed="true"] { border-color: var(--accent-line); background: var(--accent-soft); color: #eefbff; }
+.model3d-optimize-start { display: flex; justify-content: center; align-items: center; gap: 7px; width: 100%; margin-top: 12px; padding: 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: #1a2632; color: var(--text); cursor: pointer; }
+.model3d-optimize-start:disabled { opacity: .5; cursor: wait; }
+.model3d-download-glb { display: inline-flex; align-items: center; gap: 5px; margin-top: 10px; font-size: 11px; color: #b5dce9; }
+.model3d-optimize-overlay { position: absolute; inset: 0; z-index: 40; display: grid; place-items: center; padding: 20px; background: rgba(2,5,8,.88); }
+.model3d-optimize-dialog { width: min(760px, 100%); max-height: 100%; overflow: auto; padding: 18px; border: 1px solid var(--line-strong); border-radius: 12px; background: #121820; box-shadow: 0 20px 60px #0008; }
+.model3d-optimize-dialog header { display: flex; align-items: center; justify-content: space-between; }
+.model3d-optimize-dialog header button { display: grid; place-items: center; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.model3d-optimize-image { display: block; width: 100%; height: min(38vh, 420px); object-fit: contain; background: #0b1017; border-radius: 8px; }
+.model3d-optimize-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.model3d-optimize-table th, .model3d-optimize-table td { text-align: left; padding: 7px; border-bottom: 1px solid var(--line); }
+.model3d-optimize-table th { color: var(--muted); font-weight: 500; }
+.model3d-optimize-dialog footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
+.model3d-optimize-dialog footer button, .model3d-optimize-dialog footer a { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); border-radius: 8px; padding: 9px 13px; font: inherit; font-size: 12px; color: var(--text); background: #1a232e; text-decoration: none; cursor: pointer; }
+.model3d-optimize-dialog footer .model3d-optimize-apply { background: #eaf2f8; color: #10202f; }
 
 .model3d-head,
 .model3d-foot,

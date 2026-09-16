@@ -180,3 +180,53 @@ test('image and video show all generation controls in the active floating panel 
     assert.doesNotMatch(inactiveSelection, /generation-panel|<textarea/)
   }
 })
+
+test('multi-angle generation uses the model selected in the editor', async () => {
+  let sequence = 0
+  const executions = []
+  const context = helpers(['submitMultiAngle'], {
+    multiAngleSession: { nodeId: 'source', sourceImageUrl: '/source.png' },
+    nodes: [node('source', 'reference', { imageUrl: '/source.png', title: 'Source' })],
+    edges: [],
+    apiConfig: { mode: 'apimart', model: 'model-a', imageSize: '1K' },
+    imageGenerationModelOptions: [
+      { id: 'model-a', label: 'Model A' },
+      { id: 'model-b', label: 'Model B' },
+    ],
+    findApiMartModel: id => ({ id, resolutions: ['2K'], defaultResolution: '2K' }),
+    getAbsoluteNodePosition: value => value.position,
+    findFreeWorkflowNodePosition: value => value,
+    id: prefix => `${prefix}-${++sequence}`,
+    defaultLightDirection: { x: 0, y: 0, enabled: false },
+    MarkerType: { ArrowClosed: 'arrow-closed' },
+    workflowEdgeColor: '#fff',
+    imageInputHandlePrefix: 'image-',
+    normalizeImageInputEdges: values => values,
+    setNodes: update => { context.nodes = update(context.nodes) },
+    setEdges: update => { context.edges = update(context.edges) },
+    setSelectedNodeId: value => { context.selectedNodeId = value },
+    setMultiAngleSession: value => { context.multiAngleSession = value },
+    markDirty: () => { context.dirty = true },
+    setToast: value => { context.toast = value },
+    window: { setTimeout: callback => callback() },
+    flowInstance: null,
+    executeMultiAngleGeneration: (...args) => { executions.push(args) },
+  })
+  const result = {
+    presetId: 'custom', presetLabel: '自定义', horizontal: 0, vertical: 0,
+    framing: 'medium', lens: 'standard', roll: 0,
+    modelId: 'model-b', modelLabel: 'Model B', prompt: 'new angle',
+    sourceWidth: 1200, sourceHeight: 800,
+  }
+
+  await context.submitMultiAngle(result)
+
+  const output = context.nodes.find(value => value.id.startsWith('multi-angle-result-'))
+  assert.equal(output.data.model, 'model-b')
+  assert.equal(output.data.imageSize, '2K')
+  assert.equal(context.edges[0].source, 'source')
+  assert.equal(context.edges[0].target, output.id)
+  assert.equal(executions[0][0], output)
+  assert.equal(executions[0][2], result)
+  assert.match(context.toast, /Model B/)
+})

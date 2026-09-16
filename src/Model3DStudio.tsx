@@ -4,6 +4,7 @@ import {
   Camera,
   Check,
   Copy,
+  Download,
   Focus,
   ImagePlus,
   Layers3,
@@ -23,6 +24,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import UnifiedRange from './UnifiedRange'
+import { cacheModelFile, createStaticModelSnapshot, disposeStaticSnapshot, formatModelBytes, optimizeModelSnapshot, parseModelBuffer, persistModelSource } from './model3dAssets'
 import { deleteModel3DDraft, model3DStorageErrorMessage, readModel3DDraft, saveModel3DDraft } from './model3dSceneStore'
 import type {
   ParametricBoxSettings,
@@ -83,6 +85,15 @@ type SceneItemSnapshot = {
   color: string
   parametricBox?: ParametricBoxSettings
   parametricPrimitive?: ParametricPrimitiveSettings
+}
+
+type OptimizationPreview = {
+  originalId: string
+  object: THREE.Object3D
+  source: SavedModel3DSource
+  beforeImage: string
+  afterImage: string
+  applied: boolean
 }
 
 type SceneHistorySnapshot = {
@@ -223,24 +234,15 @@ function modelFileExtension(fileName: string) {
   return fileName.split('.').pop()?.toLowerCase() || ''
 }
 
-function fileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error || new Error('模型文件读取失败'))
-    reader.readAsDataURL(file)
-  })
-}
-
 async function parseSavedModelSource(source: SavedModel3DSource) {
   const response = await fetch(source.url)
   if (!response.ok) throw new Error(`模型资源读取失败：${response.status}`)
-  if (source.format === 'OBJ') {
-    const { OBJLoader } = await import('three/addons/loaders/OBJLoader.js')
-    return new OBJLoader().parse(await response.text())
-  }
-  const { FBXLoader } = await import('three/addons/loaders/FBXLoader.js')
-  return new FBXLoader().parse(await response.arrayBuffer(), '')
+  const buffer = await response.arrayBuffer()
+  const startedAt = performance.now()
+  const object = await parseModelBuffer(buffer, source.format)
+  source.byteLength = buffer.byteLength
+  source.loadMs = performance.now() - startedAt
+  return object
 }
 
 function collectModelStats(object: THREE.Object3D): ModelStats {
@@ -361,6 +363,17 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   const [transformSpace, setTransformSpace] = useState<TransformSpace>('world')
   const [transformRevision, setTransformRevision] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [optimizing, setOptimizing] = useState(false)
+  const [optimizationRatio, setOptimizationRatio] = useState(1)
+  const [optimizationPreview, setOptimizationPreview] = useState<OptimizationPreview | null>(null)
+  const [showOptimizedPreview, setShowOptimizedPreview] = useState(true)
+  const optimizationDialogRef = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    if (optimizationPreview) optimizationDialogRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+  }, [optimizationPreview])
+  useEffect(() => () => {
+    if (optimizationPreview && !optimizationPreview.applied) disposeModel(optimizationPreview.object, null)
+  }, [optimizationPreview])
   const [exporting, setExporting] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'resetting' | 'saved' | 'error'>('idle')
   const [draggingOverViewport, setDraggingOverViewport] = useState(false)
@@ -468,6 +481,8 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     const runtime = runtimeRef.current
     if (!runtime) return
     loadSequenceRef.current += 1
+    setOptimizationPreview(null)
+    setOptimizing(false)
     if (useSavedScene) {
       setSaveStatus('resetting')
       try {
@@ -958,6 +973,19 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null
+      if (optimizationPreview) {
+        if (event.key === 'Escape') { event.preventDefault(); setOptimizationPreview(null) }
+        if (event.key === 'Tab') {
+          const controls = optimizationDialogRef.current?.querySelectorAll<HTMLElement>('button, a[href]')
+          if (controls?.length) {
+            const first = controls[0], last = controls[controls.length - 1]
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+          }
+        }
+        return
+      }
+      if (optimizing && event.key !== 'Escape') return
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault()
         undoSceneRef.current()
@@ -971,7 +999,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
+  }, [onClose, optimizing, optimizationPreview])
 
   function nextPlacement(index: number) {
     const column = index % 3
@@ -1227,13 +1255,15 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
             disposeModel(object, null)
             return
           }
+          const source = await persistModelSource(savedItem.source).catch(() => savedItem.source!)
+          if (sequence !== loadSequenceRef.current) { disposeModel(object, null); return }
           const item = addSceneObject(
             object,
             savedItem.name,
             savedItem.source.format,
             savedItem.color || defaultModelColor,
             false,
-            { ...savedItem.source },
+            { ...source },
           )
           item.name = savedItem.name
           item.object.name = savedItem.name
@@ -1387,12 +1417,14 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     }
     if (recordHistory) pushSceneHistory()
 
-    object.scale.multiplyScalar(2.35 / maximumDimension)
-    object.updateMatrixWorld(true)
-    const scaledBox = new THREE.Box3().setFromObject(object)
-    const center = scaledBox.getCenter(new THREE.Vector3())
-    object.position.set(-center.x, -scaledBox.min.y, -center.z)
-    object.position.add(nextPlacement(sceneItemsRef.current.length))
+    if (!source?.localCoordinates) {
+      object.scale.multiplyScalar(2.35 / maximumDimension)
+      object.updateMatrixWorld(true)
+      const scaledBox = new THREE.Box3().setFromObject(object)
+      const center = scaledBox.getCenter(new THREE.Vector3())
+      object.position.set(-center.x, -scaledBox.min.y, -center.z)
+      object.position.add(nextPlacement(sceneItemsRef.current.length))
+    }
     const id = crypto.randomUUID()
     object.userData.sceneItemId = id
     object.name = name
@@ -1408,9 +1440,10 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   }
 
   async function loadModelFiles(files: File[]) {
-    const supportedFiles = files.filter((file) => ['obj', 'fbx'].includes(modelFileExtension(file.name)))
+    if (optimizing || optimizationPreview) return
+    const supportedFiles = files.filter((file) => ['obj', 'fbx', 'glb'].includes(modelFileExtension(file.name)))
     if (!supportedFiles.length) {
-      setError('仅支持 OBJ 或 FBX 格式文件')
+      setError('仅支持 OBJ、FBX 或 GLB 格式文件')
       return
     }
     if (supportedFiles.some((file) => file.size > maximumModelFileSize)) {
@@ -1425,25 +1458,15 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     try {
       for (const file of supportedFiles) {
         const extension = modelFileExtension(file.name)
-        const source: SavedModel3DSource = {
-          fileName: file.name,
-          format: extension === 'obj' ? 'OBJ' : 'FBX',
-          url: await fileAsDataUrl(file),
-        }
-        let object: THREE.Object3D
-        if (extension === 'obj') {
-          const [{ OBJLoader }, content] = await Promise.all([
-            import('three/addons/loaders/OBJLoader.js'),
-            file.text(),
-          ])
-          object = new OBJLoader().parse(content)
-        } else {
-          const [{ FBXLoader }, buffer] = await Promise.all([
-            import('three/addons/loaders/FBXLoader.js'),
-            file.arrayBuffer(),
-          ])
-          object = new FBXLoader().parse(buffer, '')
-        }
+        const format = extension.toUpperCase() as SavedModel3DSource['format']
+        const buffer = await file.arrayBuffer()
+        const startedAt = performance.now()
+        const object = await parseModelBuffer(buffer, format)
+        const loadMs = performance.now() - startedAt
+        let source: SavedModel3DSource
+        try {
+          source = { ...await cacheModelFile(file, file.name, format), loadMs }
+        } catch (reason) { disposeModel(object, null); throw reason }
         if (sequence !== loadSequenceRef.current) {
           disposeModel(object, null)
           return
@@ -1456,6 +1479,88 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     } finally {
       if (sequence === loadSequenceRef.current) setLoading(false)
     }
+  }
+
+  async function optimizeSelectedModel() {
+    const original = selectedItem
+    const runtime = runtimeRef.current
+    if (!original?.source || !runtime || loading || optimizing || optimizationPreview) return
+    const sequence = loadSequenceRef.current
+    setOptimizing(true)
+    setError('')
+    let snapshot: THREE.Object3D | null = null
+    let candidate: THREE.Object3D | null = null
+    try {
+      snapshot = createStaticModelSnapshot(original.object)
+      const source = await optimizeModelSnapshot(snapshot, original.source, optimizationRatio)
+      candidate = await parseSavedModelSource(source)
+      if (sequence !== loadSequenceRef.current || !sceneItemsRef.current.includes(original)) return
+      candidate.traverse((child) => {
+        const mesh = child as THREE.Mesh
+        if (!mesh.isMesh) return
+        for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) disposeMaterial(material)
+        mesh.material = original.material.clone()
+        mesh.castShadow = mesh.receiveShadow = true
+      })
+      candidate.position.copy(original.object.position)
+      candidate.quaternion.copy(original.object.quaternion)
+      candidate.scale.copy(original.object.scale)
+      const selectionVisible = runtime.selectionBox.visible
+      const gizmo = runtime.transformControls.getHelper()
+      const gizmoVisible = gizmo.visible
+      const originalVisible = original.object.visible
+      let beforeImage: string
+      let afterImage: string
+      try {
+        runtime.selectionBox.visible = gizmo.visible = false
+        runtime.renderer.shadowMap.needsUpdate = true
+        runtime.renderer.render(runtime.scene, runtime.camera)
+        beforeImage = runtime.renderer.domElement.toDataURL('image/png')
+        original.object.visible = false
+        runtime.scene.add(candidate)
+        runtime.renderer.shadowMap.needsUpdate = true
+        runtime.renderer.render(runtime.scene, runtime.camera)
+        afterImage = runtime.renderer.domElement.toDataURL('image/png')
+      } finally {
+        runtime.scene.remove(candidate)
+        original.object.visible = originalVisible
+        runtime.selectionBox.visible = selectionVisible
+        gizmo.visible = gizmoVisible
+        runtime.renderer.shadowMap.needsUpdate = true
+        runtime.renderer.render(runtime.scene, runtime.camera)
+      }
+      setOptimizationPreview({ originalId: original.id, object: candidate, source, beforeImage, afterImage, applied: false })
+      setShowOptimizedPreview(true)
+      candidate = null
+    } catch (reason) {
+      if (sequence === loadSequenceRef.current) setError(reason instanceof Error ? reason.message : '模型优化失败')
+    } finally {
+      if (snapshot) disposeStaticSnapshot(snapshot)
+      if (candidate) disposeModel(candidate, null)
+      if (sequence === loadSequenceRef.current) setOptimizing(false)
+    }
+  }
+
+  function applyOptimizedModel() {
+    const preview = optimizationPreview
+    const runtime = runtimeRef.current
+    const original = sceneItemsRef.current.find((item) => item.id === preview?.originalId)
+    if (!preview || !runtime || !original) { setOptimizationPreview(null); return }
+    pushSceneHistory()
+    const replacement = addSceneObject(preview.object, original.name, 'GLB', `#${original.material.color.getHexString()}`, false, preview.source)
+    replacement.object.position.copy(original.object.position)
+    replacement.object.quaternion.copy(original.object.quaternion)
+    replacement.object.scale.copy(original.object.scale)
+    runtime.transformControls.detach()
+    runtime.scene.remove(original.object)
+    sceneItemsRef.current = sceneItemsRef.current.filter((item) => item !== replacement).map((item) => item === original ? replacement : item)
+    preview.applied = true
+    setOptimizationPreview(null)
+    syncSceneItems()
+    selectSceneItem(replacement.id)
+    runtime.transformControls.attach(replacement.object)
+    updateSceneBounds(false)
+    setSaveStatus('idle')
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -1663,7 +1768,33 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
       }}
     >
       <section className="model3d-studio" role="dialog" aria-modal="true" aria-label="3D 模型预览">
-        <header className="model3d-head">
+        {optimizationPreview && (
+          <div className="model3d-optimize-overlay">
+            <section ref={optimizationDialogRef} className="model3d-optimize-dialog" role="dialog" aria-modal="true" aria-label="模型优化对比">
+              <header><strong>模型优化对比</strong><button type="button" onClick={() => setOptimizationPreview(null)} aria-label="取消模型优化"><X size={18} /></button></header>
+              <div className="model3d-optimize-tabs" role="group" aria-label="优化外观对比">
+                <button type="button" aria-pressed={!showOptimizedPreview} onClick={() => setShowOptimizedPreview(false)}>原始画面</button>
+                <button type="button" aria-pressed={showOptimizedPreview} onClick={() => setShowOptimizedPreview(true)}>优化后画面</button>
+              </div>
+              <img className="model3d-optimize-image" src={showOptimizedPreview ? optimizationPreview.afterImage : optimizationPreview.beforeImage} alt={showOptimizedPreview ? '优化后模型预览' : '原始模型预览'} />
+              <table className="model3d-optimize-table"><thead><tr><th>对比项</th><th>原始模型</th><th>压缩 GLB</th></tr></thead><tbody>
+                <tr><th>文件大小</th><td>{formatModelBytes(optimizationPreview.source.optimization?.originalBytes)}</td><td>{formatModelBytes(optimizationPreview.source.byteLength)}</td></tr>
+                <tr><th>三角面</th><td>{formatCount(optimizationPreview.source.optimization?.originalTriangles ?? 0)}</td><td>{formatCount(optimizationPreview.source.optimization?.triangles ?? 0)}</td></tr>
+                <tr><th>本次解析耗时</th><td>{optimizationPreview.source.optimization?.originalLoadMs === undefined ? '未统计' : `${Math.round(optimizationPreview.source.optimization.originalLoadMs)} ms`}</td><td>{Math.round(optimizationPreview.source.loadMs ?? 0)} ms</td></tr>
+              </tbody></table>
+              <p>{(optimizationPreview.source.byteLength ?? 0) < (optimizationPreview.source.optimization?.originalBytes ?? 0)
+                ? `文件缩小 ${(100 * (1 - optimizationPreview.source.byteLength! / optimizationPreview.source.optimization!.originalBytes)).toFixed(1)}%。`
+                : '这个模型已经很小，转换后文件没有变小，可以保留原模型。'} 解析耗时包含解码器初始化，会受缓存影响。</p>
+              <p>优化副本为当前姿态的纯色静态模型；请检查轮廓和细节。应用后可用 Ctrl+Z 撤销。</p>
+              <footer>
+                <a href={optimizationPreview.source.url} download={optimizationPreview.source.fileName}><Download size={14} /> 下载 GLB</a>
+                <button type="button" onClick={() => setOptimizationPreview(null)}>保留原模型</button>
+                <button type="button" className="model3d-optimize-apply" onClick={applyOptimizedModel}>应用优化模型</button>
+              </footer>
+            </section>
+          </div>
+        )}
+        <header className="model3d-head" inert={Boolean(optimizationPreview)}>
           <div className="model3d-title">
             <Box size={19} />
             <div>
@@ -1686,14 +1817,14 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
           </div>
         </header>
 
-        <div className="model3d-body">
+        <div className="model3d-body" inert={Boolean(optimizationPreview)}>
           <div className="model3d-stage">
             <div className="model3d-filebar">
               <button type="button" className="model3d-file-button" onClick={() => fileInputRef.current?.click()}>
                 <Upload size={15} />
                 导入本地模型
               </button>
-              <input ref={fileInputRef} type="file" accept=".obj,.fbx" multiple hidden onChange={handleFileChange} />
+              <input ref={fileInputRef} type="file" accept=".obj,.fbx,.glb" multiple hidden onChange={handleFileChange} />
               <div className="model3d-file-summary">
                 {hasModel ? (
                   <>
@@ -1701,7 +1832,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
                     <span>{formatCount(totalStats.triangles)} 三角面 · 可继续拖入或导入模型</span>
                   </>
                 ) : (
-                  <span>可创建参数化礼盒，也支持批量导入 OBJ、FBX，单文件最大 100 MB</span>
+                  <span>支持 OBJ、FBX、GLB（含 Draco 压缩），单文件最大 100 MB</span>
                 )}
               </div>
               {hasModel && (
@@ -1761,18 +1892,18 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
                   <div className="model3d-empty-state">
                     <Layers3 size={40} />
                     <strong>创建或导入 3D 模型</strong>
-                    <p>使用上方参数化礼盒，也可以从本地批量导入 OBJ 或 FBX</p>
+                    <p>使用上方参数模型，也可以批量导入 OBJ、FBX 或 GLB</p>
                     <button type="button" onClick={() => fileInputRef.current?.click()}>
                       <Upload size={15} />
                       选择本地模型
                     </button>
                   </div>
                 )}
-                {loading && (
+                {(loading || optimizing) && (
                   <div className="model3d-loading-state" role="status">
                     <Loader2 size={26} />
-                    <strong>正在解析模型</strong>
-                    <span>多个模型会依次加入当前构图</span>
+                    <strong>{optimizing ? '正在优化模型' : '正在解析模型'}</strong>
+                    <span>{optimizing ? '完成后可对比外观与文件大小' : '多个模型会依次加入当前构图'}</span>
                   </div>
                 )}
                 <div className="model3d-viewport-hint">
@@ -1787,6 +1918,22 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
           </div>
 
           <aside className="model3d-inspector" aria-label="3D 预览参数">
+            {selectedItem?.source && (
+              <section className="model3d-control-section model3d-optimization">
+                <div className="model3d-section-title"><Box size={15} /><strong>模型优化</strong></div>
+                <p>{selectedItem.source.format} · {formatModelBytes(selectedItem.source.byteLength)} · {formatCount(selectedItem.stats.triangles)} 三角面</p>
+                <div className="model3d-optimize-tabs" role="group" aria-label="模型优化质量">
+                  {[{ ratio: 1, label: '仅压缩' }, { ratio: 0.75, label: '轻度减面' }, { ratio: 0.5, label: '中度减面' }].map((option) => (
+                    <button type="button" key={option.ratio} aria-pressed={optimizationRatio === option.ratio} disabled={optimizing} onClick={() => setOptimizationRatio(option.ratio)}>{option.label}</button>
+                  ))}
+                </div>
+                <small>{optimizationRatio === 1 ? '保留面数，压缩几何数据并清理当前预览未使用的材质和贴图。' : `目标保留 ${optimizationRatio * 100}% 三角面，实际数量以细节保护为准。应用前请对比外观。`}</small>
+                <button type="button" className="model3d-optimize-start" disabled={loading || optimizing || Boolean(optimizationPreview)} onClick={() => void optimizeSelectedModel()}>
+                  {optimizing && <Loader2 size={14} className="model3d-spinner" />}{optimizing ? '正在优化…' : '优化模型 · GLB'}
+                </button>
+                {selectedItem.source.format === 'GLB' && <a className="model3d-download-glb" href={selectedItem.source.url} download={selectedItem.source.fileName}><Download size={13} /> 下载 GLB</a>}
+              </section>
+            )}
             <section className="model3d-control-section">
               <div className="model3d-section-title model3d-section-title-spread">
                 <span><Layers3 size={15} /><strong>场景对象</strong></span>
@@ -2139,7 +2286,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
           </aside>
         </div>
 
-        <footer className="model3d-foot">
+        <footer className="model3d-foot" inert={Boolean(optimizationPreview)}>
           <p>模型：单击选择，W 移动，R 旋转，Delete 删除，Ctrl+Z 撤销。视角：左键旋转，中键平移，滚轮缩放，右键也可平移。</p>
           <div>
             <button className="model3d-secondary-button" type="button" onClick={onClose}>取消</button>

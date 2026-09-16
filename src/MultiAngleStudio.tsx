@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowUp,
   Camera,
   ChevronDown,
   ChevronLeft,
@@ -16,6 +15,11 @@ import './MultiAngleStudio.css'
 export type MultiAngleFraming = 'close' | 'medium' | 'wide'
 export type MultiAngleLens = 'standard' | 'fisheye' | 'tilted'
 
+export type MultiAngleModelOption = {
+  id: string
+  label: string
+}
+
 export type MultiAngleResult = {
   presetId: string
   presetLabel: string
@@ -24,6 +28,8 @@ export type MultiAngleResult = {
   framing: MultiAngleFraming
   lens: MultiAngleLens
   roll: number
+  modelId: string
+  modelLabel: string
   prompt: string
   sourceWidth: number
   sourceHeight: number
@@ -32,6 +38,9 @@ export type MultiAngleResult = {
 type Props = {
   sourceImageUrl: string
   sourceName?: string
+  models: MultiAngleModelOption[]
+  initialModelId: string
+  modelsLoading?: boolean
   busy?: boolean
   onClose: () => void
   onGenerate: (result: MultiAngleResult) => Promise<void>
@@ -150,9 +159,13 @@ function buildPrompt(view: Preset, extraPrompt: string) {
   ].filter(Boolean).join('\n')
 }
 
-export default function MultiAngleStudio({ sourceImageUrl, sourceName, busy = false, onClose, onGenerate }: Props) {
+export default function MultiAngleStudio({ sourceImageUrl, sourceName, models, initialModelId, modelsLoading = false, busy = false, onClose, onGenerate }: Props) {
   const orbitCanvasRef = useRef<HTMLCanvasElement>(null)
+  const modelPickerRef = useRef<HTMLDivElement>(null)
+  const initialModel = models.find((model) => model.id === initialModelId) || models[0] || { id: initialModelId, label: initialModelId || '当前图像模型' }
   const [view, setView] = useState<Preset>(defaultView)
+  const [selectedModelId, setSelectedModelId] = useState(initialModel.id)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [showPrompt, setShowPrompt] = useState(false)
   const [extraPrompt, setExtraPrompt] = useState('')
   const [sourceSize, setSourceSize] = useState({ width: 0, height: 0 })
@@ -161,14 +174,38 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, busy = fa
   const [error, setError] = useState('')
   const prompt = useMemo(() => buildPrompt(view, extraPrompt), [extraPrompt, view])
   const framing = framingOptions.find((option) => option.value === view.framing) || framingOptions[1]
+  const selectedModel = models.find((model) => model.id === selectedModelId) || initialModel
+
+  useEffect(() => {
+    if (models.some((model) => model.id === selectedModelId)) return
+    setSelectedModelId(models.find((model) => model.id === initialModelId)?.id || models[0]?.id || initialModelId)
+  }, [initialModelId, models, selectedModelId])
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !submitting && !busy) onClose()
+      if (event.key !== 'Escape') return
+      if (modelMenuOpen) {
+        setModelMenuOpen(false)
+        return
+      }
+      if (!submitting && !busy) onClose()
     }
     window.addEventListener('keydown', handleEscape, true)
     return () => window.removeEventListener('keydown', handleEscape, true)
-  }, [busy, onClose, submitting])
+  }, [busy, modelMenuOpen, onClose, submitting])
+
+  useEffect(() => {
+    if (!modelMenuOpen) return
+    const closeOutside = (event: PointerEvent) => {
+      if (!modelPickerRef.current?.contains(event.target as Node)) setModelMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOutside, true)
+    return () => document.removeEventListener('pointerdown', closeOutside, true)
+  }, [modelMenuOpen])
+
+  useEffect(() => {
+    if (submitting || busy || modelsLoading) setModelMenuOpen(false)
+  }, [busy, modelsLoading, submitting])
 
   useEffect(() => {
     const canvas = orbitCanvasRef.current
@@ -261,6 +298,8 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, busy = fa
 
   function reset() {
     setView({ ...defaultView })
+    setSelectedModelId(initialModel.id)
+    setModelMenuOpen(false)
     setExtraPrompt('')
     setShowPrompt(false)
     setError('')
@@ -282,6 +321,8 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, busy = fa
         framing: view.framing,
         lens: view.lens,
         roll: view.roll,
+        modelId: selectedModel.id,
+        modelLabel: selectedModel.label,
         prompt,
         sourceWidth: sourceSize.width,
         sourceHeight: sourceSize.height,
@@ -388,6 +429,53 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, busy = fa
               <output>{framing.label}</output>
             </label>
 
+            <div className="multi-angle-model-control">
+              <span>生成模型</span>
+              <div ref={modelPickerRef} className={`multi-angle-model-picker ${modelMenuOpen ? 'open' : ''}`}>
+                <button
+                  className="multi-angle-model-trigger"
+                  type="button"
+                  disabled={submitting || busy || modelsLoading || models.length <= 1}
+                  aria-label={`多角度生成模型：${selectedModel.label}`}
+                  aria-haspopup="listbox"
+                  aria-expanded={modelMenuOpen}
+                  title={modelsLoading ? '正在读取可用模型' : modelMenuOpen ? '收起模型列表' : '展开模型列表'}
+                  onClick={() => setModelMenuOpen((open) => !open)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'ArrowDown') return
+                    event.preventDefault()
+                    setModelMenuOpen(true)
+                  }}
+                >
+                  <span>{selectedModel.label}</span>
+                  {modelsLoading ? <Loader2 className="multi-angle-model-spinner" size={16} aria-hidden="true" /> : <ChevronDown size={16} aria-hidden="true" />}
+                </button>
+                {modelMenuOpen && (
+                  <div className="multi-angle-model-menu" role="listbox" aria-label="可选多角度生成模型">
+                    {models.map((model) => {
+                      const selected = model.id === selectedModel.id
+                      return (
+                        <button
+                          key={model.id}
+                          className={`multi-angle-model-option ${selected ? 'selected' : ''}`}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          onClick={() => {
+                            setSelectedModelId(model.id)
+                            setModelMenuOpen(false)
+                            setError('')
+                          }}
+                        >
+                          {model.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
             <div className="multi-angle-prompt-toggle-row">
               <span>提示词</span>
               <button
@@ -417,7 +505,7 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, busy = fa
             <div className="multi-angle-angle-card">
               <span>当前视角</span>
               <strong>{view.label}</strong>
-              <small>{degreeLabel(view.horizontal)} 水平 · {degreeLabel(view.vertical)} 垂直 · {framing.label}</small>
+              <small>{degreeLabel(view.horizontal)} 水平 · {degreeLabel(view.vertical)} 垂直 · {framing.label} · {selectedModel.label}</small>
             </div>
           </div>
         </div>
@@ -428,8 +516,8 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, busy = fa
           <button className="multi-angle-reset" type="button" onClick={reset} disabled={submitting || busy}><RotateCcw size={17} /> 重置参数</button>
           <div>
             <span>结果保持原图尺寸并自动连接到画布</span>
-            <button className="multi-angle-generate" type="button" onClick={() => void submit()} disabled={loading || submitting || busy || Boolean(error)} title="按当前角度生成">
-              {submitting || busy ? <Loader2 className="multi-angle-spinner" size={20} /> : <ArrowUp size={22} />}
+            <button className="multi-angle-generate" type="button" onClick={() => void submit()} disabled={loading || submitting || busy || Boolean(error)} title={`使用 ${selectedModel.label} 按当前角度生成`} aria-label={`使用 ${selectedModel.label} 按当前角度生成`}>
+              {submitting || busy ? <Loader2 className="multi-angle-spinner" size={15} /> : 'Run'}
             </button>
           </div>
         </footer>

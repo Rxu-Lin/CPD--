@@ -56,8 +56,8 @@
 .sketch-resolution button.active { background: #354655; color: #fff; border-color: #afbfcd; }
 .sketch-footer { min-height: 64px; padding: 12px 16px; border-top: 1px solid #293440; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .sketch-footer > div:last-child { display: flex; flex-shrink: 0; gap: 8px; }
-.sketch-footer .sketch-generate { background: #edf2f6; color: #121921; font-weight: 700; }
-.sketch-footer .sketch-generate:hover:not(:disabled) { background: #fff; }
+.sketch-footer .sketch-generate { display: grid; flex: 0 0 36px; width: 36px; min-width: 36px; height: 36px; place-items: center; padding: 0; border: 1px solid #dae7f0; border-radius: 9px; background: #eaf2f8; color: #10202f; font-size: 12px; font-weight: 820; letter-spacing: .01em; line-height: 1; box-shadow: 0 7px 18px rgba(0,0,0,.2); transition: transform 140ms ease, background 140ms ease; }
+.sketch-footer .sketch-generate:hover:not(:disabled) { background: #fff; transform: translateY(-1px); }
 .sketch-error { color: #ffb8b8; font-size: 11px; }
 .sketch-model-overlay { position: fixed; inset: 0; z-index: 90; }
 .sketch-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px; background: #0b1118e8; color: #e9f0f6; }

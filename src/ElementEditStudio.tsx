@@ -536,7 +536,19 @@ export default function ElementEditStudio({ sourceImageUrl, sourceName, modelLab
 
         <footer className="element-edit-foot">
           <span>{submitting || busy ? '正在逐处生成局部修改…' : hasSelection ? `已选择 ${markers.length} 个标记${hasMask ? '及框选 / 手绘区域' : ''}，预计调用 ${markers.length + (hasMask ? 1 : 0)} 次生成` : '点击画面添加多个局部标记'}</span>
-          <div><button type="button" onClick={onClose} disabled={submitting || busy}>取消</button><button className="primary" type="button" onClick={() => void submit()} disabled={loading || submitting || busy || !hasSelection}>{submitting || busy ? <Loader2 size={15} /> : <Wand2 size={15} />}{submitting || busy ? '处理中…' : '生成新版本'}</button></div>
+          <div>
+            <button type="button" onClick={onClose} disabled={submitting || busy}>取消</button>
+            <button
+              className="primary element-edit-run"
+              type="button"
+              onClick={() => void submit()}
+              disabled={loading || submitting || busy || !hasSelection}
+              aria-label={submitting || busy ? '正在生成新版本' : '运行元素编辑生成'}
+              title={submitting || busy ? '正在生成新版本' : '运行元素编辑生成'}
+            >
+              {submitting || busy ? <Loader2 size={15} /> : 'Run'}
+            </button>
+          </div>
         </footer>
       </section>
     </div>

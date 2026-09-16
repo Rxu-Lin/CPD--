@@ -1,52 +1,46 @@
-# 多角度编辑器角度区域 Design QA
+# 多角度编辑器暗色模型菜单 Design QA
 
 ## Findings
 
 - 无 P0 / P1 / P2 问题。
-- P3（可接受）：参考图用青色圆点标识相机位置；实现使用现有图标库的摄像机图标和青色状态块，信息更明确，符合本轮需求。
-- P3（有意差异）：参考图区域为中性灰；实现改为产品现有的深蓝黑表面色，以统一其他功能框。
+- 本轮只调整模型选择的展开层视觉与交互，没有改变模型来源、生成逻辑或编辑器布局。
 
 ## 对照证据
 
-- source visual truth path: 当前任务的 Browser 批注截图，页面 `http://127.0.0.1:5174/`；批注意图为“默认在中心，移动时图标始终向上”。
-- 补充稳定参考：`multi-angle-orbit-reference.png`。
-- implementation screenshot path: Codex in-app Browser transient capture, tab 1, `http://127.0.0.1:5174/`（浏览器内截图已检查；当前浏览器不提供截图文件导出）。
-- viewport: 1936 × 1272 capture；devicePixelRatio 1.5。
-- state: 用户真实图片 `1200 × 2132px`，多角度编辑器打开，自定义预设，水平 0° / 90°、垂直 0° / 40°、中景。
-- full-view comparison evidence: 默认中心状态与水平 90° 状态均完成全弹窗截图检查，弹窗布局、颜色和其他控件没有变化。
-- focused region comparison evidence: 通过角度区域 DOM 几何值对照摄像机与参考图的位置和 transform，避免仅凭截图判断旋转。
+- source visual truth path: `C:/Users/Administrator/AppData/Local/Temp/codex-clipboard-6fb28d7e-07e3-45cc-af95-ea8487a3033d.png`，687 × 413px，截图显示原生下拉菜单为白色，与暗色编辑器不一致。
+- implementation screenshot path: Codex in-app Browser transient capture, QA URL `http://127.0.0.1:5174/?multi-angle-select-qa=1`（浏览器内截图已检查；临时 QA 入口已删除）。
+- viewport: 1280 × 720；devicePixelRatio 1.5。
+- source and implementation normalization: 源图是局部裁切；实现同时检查 1280 × 720 全弹窗和同一模型菜单区域，CSS 像素按 1.5 DPR 渲染，无额外缩放。
+- state: 多角度编辑器打开，自定义视角 0° / 0°、中景，模型菜单展开，7 个 API Mart 图像模型可见。
+- full-view comparison evidence: 完整弹窗截图确认暗色菜单没有改变预设、角度球、参考图、参数、摘要和底部操作的比例与位置。
+- focused region comparison evidence: 源图与展开后的实现截图在同一次比较中并列检查；实现菜单背景为 `rgb(13, 19, 27)`，边框为 `rgba(205, 214, 224, 0.24)`，选中项为低亮度青色暗底。
 
 ## Fidelity Surfaces
 
-- 字体与层级：沿用应用现有系统字体、字号和字重；摄像机标记为图形信息，不引入额外文字噪音。
-- 间距与布局：参考图固定在网格中心；网格、摄像机、四向控制保持清晰层级，放大后的球体比例接近参考画面。
-- 色彩与视觉令牌：弹窗、预设、角度区域、参数卡统一使用应用的 `surface`、`surface-2`、`line`、`accent` 色彩令牌。
-- 图像质量与资产：参考图片使用真实上传内容；摄像机使用项目现有 Lucide 图标，不使用文本符号或临时代替图形。
-- 文案与内容：保留原有视角、角度、景别、原尺寸和自动连接说明。
+- Fonts and typography: 沿用应用系统字体；菜单项 13px、560 字重，选中项 680 字重，长模型名保持单行可读。
+- Spacing and layout rhythm: 触发框继续保持 42px 高与 9px 圆角；菜单间距 6px、内边距 4px、单项最小高度 36px，与现有模型菜单一致。
+- Colors and visual tokens: 触发框与菜单均使用 `#0d131b` 深色表面；悬停为低对比白色叠层，选中项为 `rgba(97, 199, 232, 0.14)`，没有白色系统面板。
+- Image quality and asset fidelity: 本轮没有新增或替换图片资产；参考图、网格和摄像机图标保持原样。
+- Copy and content: 所有模型名称完整保留，当前视角摘要与生成按钮继续显示所选模型。
 
 ## 交互与状态测试
 
-- 默认 0° / 0°：摄像机中心与参考图片中心重合。
-- 水平角度从 0° 调至 90°：参考图位置变化 `x=0, y=0`；摄像机移动 `x=142px, y=0`；摄像机 transform 前后均为 `matrix(1, 0, 0, 1, -14.5, -14.5)`，没有旋转。
-- 垂直角度从 0° 调至 40°：摄像机移动到新的球面位置，transform 仍完全一致，图标保持向上；参考图仍固定。
-- 用户原有的 `-1° / 0°` 参数在测试后已恢复。
-- 摄像机位置提供可访问描述，实时包含水平与垂直角度。
-- 当前交互没有新增 `MultiAngleStudio` 控制台错误；日志中仅保留 Vite 热更新期间的历史 React Flow 提示及已恢复的旧 App 热更新错误。
+- 点击触发框后，深色菜单展开并正确标记 `Nano Banana Pro` 为当前选项。
+- 点击 `GPT Image 2` 后，菜单收起，触发框和当前视角摘要同步更新。
+- 菜单打开时按 Escape 只收起菜单，编辑器保持打开。
+- 菜单使用 `listbox` / `option` 语义，触发按钮提供展开状态和当前模型描述。
+- 控制台无 error 或 warning。
 
 ## Comparison History
 
-- 初次实现问题：参考图跟随水平、垂直、景别和倾斜预设移动、缩放或旋转；角度区域使用独立灰色调；仅有圆点，没有摄像机图标。
-- 第二轮批注问题：摄像机默认位于球体顶部，而且图标随轨迹发生旋转。
-- 修复：摄像机球面投影改为 0° / 0° 对应中心；移除动态图标旋转，仅保留固定居中位移。
-- 修复后证据：默认状态与 90° / 40° 状态均在 in-app Browser 中检查；参考图 DOM 几何位置完全一致，摄像机按参数移动且 transform 始终不变。
+- 初始问题（P2）：操作系统原生下拉展开层为白色，文字对比异常，与整个暗色弹窗明显割裂。
+- 修复：替换为应用现有模型选择器同类的自定义暗色菜单，并增加暗色选中、悬停、滚动和键盘关闭状态。
+- 修复后证据：展开状态截图与源图同次并列检查，白色面板已消失；完整弹窗无新增遮挡或布局回退。
 
-## Implementation Checklist
+## Verification
 
-- [x] 参考图固定
-- [x] 球形网格随水平和俯仰参数旋转
-- [x] 摄像机图标随参数移动，但始终保持向上且不旋转
-- [x] 色调与其他功能框一致
-- [x] 桌面视口无溢出或遮挡
-- [x] 构建、代码检查和现有测试通过
+- `npm run build`: passed。
+- `npm run lint`: passed。
+- `node --test tests/*.test.mjs`: 32 passed, 0 failed, 2 skipped。
 
 final result: passed
