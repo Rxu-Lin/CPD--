@@ -67,7 +67,7 @@ import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
 import UnifiedRange from './UnifiedRange'
 import './App.css'
-import { generationPromptText, migrateLegacyPromptNodes } from './workflowPrompts'
+import { generationPromptText, migrateLegacyPromptNodes, whiteModelAnimationPrompt } from './workflowPrompts'
 import { canvasMediaClipboardType, createCanvasMediaClipboard, createDraggedMediaNodes, createPastedMediaNodes, mediaDataForCopy, parseCanvasMediaClipboard, serializeCanvasMediaClipboard, type CanvasMediaClipboard } from './canvasMediaClipboard'
 import {
   defaultGrsAiModel,
@@ -275,6 +275,7 @@ type WorkflowNodeData = {
   imageUrl?: string
   videoUrl?: string
   videoDurationSeconds?: number
+  referenceRequirements?: { images: number; videos: number }
   sourceImageUrl?: string
   maskUrl?: string
   elementEditOperations?: ElementEditOperation[]
@@ -766,6 +767,14 @@ const apiMartModels: ApiMartModelOption[] = [
     label: 'Seedream 5.0 Lite',
     resolutions: ['2K', '3K', '4K'],
     defaultResolution: '2K',
+    maxReferenceImages: 14,
+  },
+  {
+    id: 'midjourney-v8.2',
+    label: 'Midjourney v8.2',
+    resolutions: ['1K', '2K'],
+    defaultResolution: '1K',
+    // Website reference limit; the Imagine API does not document a fixed count.
     maxReferenceImages: 14,
   },
 ]
@@ -3145,9 +3154,8 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               <span>时长 <strong>{selectedVideoDuration} 秒</strong></span>
               <UnifiedRange min={videoModelConfig.minDuration} max={videoModelConfig.maxDuration} step={1} value={selectedVideoDuration} onValueChange={(duration) => data.onChangeVideoDuration?.(nodeId, duration)} disabled={isGenerating} aria-label={'视频生成时长 ' + selectedVideoDuration + ' 秒'} />
             </label>
-            <button className="generation-submit" type="button" onClick={() => data.onGenerate?.(nodeId)} disabled={isGenerating} aria-label={isGenerating ? '正在生成' : '运行视频生成'}>
-              {isGenerating ? <Loader2 size={15} className="export-spinner" /> : <Wand2 size={15} />}
-              {isGenerating ? '生成中…' : '生成视频'}
+            <button className="generation-submit generation-submit-run" type="button" onClick={() => data.onGenerate?.(nodeId)} disabled={isGenerating} aria-label={isGenerating ? '正在生成' : '运行视频生成'} title={isGenerating ? '正在生成' : '运行视频生成'}>
+              {isGenerating ? <Loader2 size={15} className="export-spinner" /> : 'Run'}
             </button>
           </div>
         )}
@@ -4562,7 +4570,7 @@ export default function App() {
           : imageModel.defaultResolution)
       : apiConfig.imageSize
     if (imageModel && referenceImageUrls.length > imageModel.maxReferenceImages) {
-      const message = `${imageModel.label} 最多支持 ${imageModel.maxReferenceImages} 张参考图。`
+      const message = `${imageModel.label}${imageModel.id === 'midjourney-v8.2' ? ' 在本网站' : ''}最多支持 ${imageModel.maxReferenceImages} 张参考图。`
       updateNodeData(nodeId, { status: 'error', error: message })
       setToast(message)
       return
@@ -4707,6 +4715,14 @@ export default function App() {
 
     if (apiConfig.mode !== 'apimart') {
       updateNodeData(nodeId, { status: 'error', error: '请在 API 设置中选择“API Mart 图像 / 视频”并填写 API Key。' })
+      return
+    }
+
+    const requirements = node.data.referenceRequirements
+    if (requirements && (referenceImageUrls.length < requirements.images || referenceVideoUrls.length < requirements.videos)) {
+      const message = '请先上传并连接白膜参考视频和静帧参考图，再运行白膜动态生成。'
+      updateNodeData(nodeId, { status: 'error', error: message })
+      setToast(message)
       return
     }
 
@@ -5359,6 +5375,10 @@ export default function App() {
     outputKind: 'image' | 'video'
     initialPrompt?: string
     lightDirectionEnabled?: boolean
+    videoModel?: string
+    referenceVideo?: boolean
+    referenceImageTitle?: string
+    referenceVideoTitle?: string
     toastMessage: string
   }) {
     const canvasCenter = flowInstance?.screenToFlowPosition(
@@ -5368,13 +5388,16 @@ export default function App() {
     const createdAt = new Date().toLocaleString('zh-CN')
     const referenceNodeId = id('ref')
     const outputNodeId = id(options.outputKind)
+    const videoModel = options.videoModel || apiConfig.videoModel
+    const addsReferenceVideo = options.outputKind === 'video' && Boolean(options.referenceVideo)
+    const referenceVideoNodeId = addsReferenceVideo ? id('video-ref') : undefined
     const referenceNode: WorkflowNode = {
       id: referenceNodeId,
       type: 'workflow',
       position: { x: canvasCenter.x - 560, y: canvasCenter.y - 340 },
       data: {
         kind: 'reference',
-        title: '参考图像',
+        title: options.referenceImageTitle || '参考图像',
         status: 'idle',
         model: '上传',
         lightDirection: options.outputKind === 'image'
@@ -5394,19 +5417,21 @@ export default function App() {
         title: options.outputKind === 'video' ? 'AI 视频生成' : 'AI 生成图像',
         prompt: options.initialPrompt || '',
         status: 'idle',
-        model: options.outputKind === 'video' ? apiConfig.videoModel : apiConfig.model,
+        model: options.outputKind === 'video' ? videoModel : apiConfig.model,
         imageSize: options.outputKind === 'image' ? apiConfig.imageSize : undefined,
         lightDirection: options.outputKind === 'image' ? { ...defaultLightDirection } : undefined,
         size: apiConfig.size || defaultApiConfig.size,
         ...(options.outputKind === 'video'
           ? {
-              videoResolution: findApiMartVideoModel(apiConfig.videoModel).defaultResolution,
-              videoDuration: findApiMartVideoModel(apiConfig.videoModel).defaultDuration,
+              videoResolution: findApiMartVideoModel(videoModel).defaultResolution,
+              videoDuration: findApiMartVideoModel(videoModel).defaultDuration,
+              ...(addsReferenceVideo ? { referenceRequirements: { images: 1, videos: 1 } } : {}),
             }
           : {}),
         createdAt,
       },
     }
+    const workflowNodes: WorkflowNode[] = [referenceNode, outputNode]
     const workflowEdges: Edge[] = [
       {
         id: id('edge'),
@@ -5419,11 +5444,35 @@ export default function App() {
         style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
       },
     ]
+    if (referenceVideoNodeId) {
+      workflowNodes.unshift({
+        id: referenceVideoNodeId,
+        type: 'workflow',
+        position: { x: canvasCenter.x - 560, y: canvasCenter.y + 90 },
+        data: {
+          kind: 'video-reference',
+          title: options.referenceVideoTitle || '参考视频',
+          status: 'idle',
+          model: '上传',
+          size: apiConfig.size || defaultApiConfig.size,
+          createdAt,
+        },
+      })
+      workflowEdges.push({
+        id: id('edge'),
+        source: referenceVideoNodeId,
+        sourceHandle: 'output',
+        target: outputNodeId,
+        targetHandle: `${videoInputHandlePrefix}1`,
+        animated: true,
+        markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor },
+        style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
+      })
+    }
 
     setNodes((current) => [
       ...current.map((node) => ({ ...node, selected: false })),
-      referenceNode,
-      outputNode,
+      ...workflowNodes,
     ])
     setEdges((current) => [...current, ...workflowEdges])
     setSelectedNodeId(outputNodeId)
@@ -5433,7 +5482,7 @@ export default function App() {
     setToast(options.toastMessage)
     window.setTimeout(() => {
       void flowInstance?.fitView({
-        nodes: [{ id: referenceNodeId }, { id: outputNodeId }],
+        nodes: workflowNodes.map((node) => ({ id: node.id })),
         padding: 0.18,
         maxZoom: 0.92,
         duration: 240,
@@ -5445,6 +5494,18 @@ export default function App() {
     addQuickStartWorkflow({
       outputKind: 'image',
       toastMessage: '已创建参考图生成工作流，请上传参考图并填写提示词。',
+    })
+  }
+
+  function addWhiteModelAnimationQuickWorkflow() {
+    addQuickStartWorkflow({
+      outputKind: 'video',
+      videoModel: 'seedance-2.5',
+      referenceVideo: true,
+      referenceImageTitle: '静帧参考图 · 唯一视觉外观',
+      referenceVideoTitle: '白膜参考视频 · 纯运动',
+      initialPrompt: whiteModelAnimationPrompt,
+      toastMessage: '已创建白膜动态生成工作流：请上传白膜视频与静帧参考图，使用 Seedance 2.5 生成。',
     })
   }
 
@@ -6480,13 +6541,13 @@ export default function App() {
                   </button>
                 </div>
                 <div className="quick-workflow-list">
-                  <button className="quick-workflow-card" type="button" onClick={addImageToImageQuickWorkflow}>
+                  <button className="quick-workflow-card" type="button" onClick={addWhiteModelAnimationQuickWorkflow}>
                     <span className="quick-workflow-icon" aria-hidden="true">
                       <WorkflowIcon size={18} />
                     </span>
                     <span className="quick-workflow-copy">
-                      <strong>图生图</strong>
-                      <small>空白参考图 + 空白提示词 + 图像生成</small>
+                      <strong>白膜动态生成</strong>
+                      <small>白膜参考视频 + 静帧参考图 → Seedance 2.5</small>
                     </span>
                     <span className="quick-workflow-action">创建</span>
                   </button>

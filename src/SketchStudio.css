@@ -18,6 +18,8 @@
 .sketch-stage { flex: 1; min-height: 0; position: relative; overflow: hidden; touch-action: none; overscroll-behavior: contain; }
 .sketch-paper { position: absolute; left: 50%; top: 50%; transform-origin: center; box-shadow: 0 6px 35px #1e293b1c; }
 .sketch-paper canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.sketch-brush-cursor { position: absolute; z-index: 4; box-sizing: border-box; border: 1px solid rgba(255,255,255,.96); border-radius: 50%; pointer-events: none; transform: translate(-50%, -50%); box-shadow: 0 0 0 1px rgba(0,0,0,.78), 0 1px 4px rgba(0,0,0,.3); }
+.sketch-brush-cursor[hidden] { display: none; }
 .sketch-stage-label { position: absolute; left: 16px; bottom: 10px; background: #e8eaedd9; border-radius: 4px; padding: 4px 6px; color: #58616c; font-size: 11px; pointer-events: none; }
 .sketch-zoom { position: absolute; right: 16px; bottom: 9px; display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: #fff; border: 1px solid #d7dce1; }
 .sketch-zoom button { background: transparent; color: #465260; border: 0; min-height: 27px; padding: 4px 7px; }

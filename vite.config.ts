@@ -1501,6 +1501,7 @@ const apiMartModelConfigs: Record<
     maxReferenceImages: number
     requiresPublicReferenceUrls?: boolean
     defaultQuality?: 'medium'
+    midjourneyVersion?: string
   }
 > = {
   'gemini-3-pro-image-preview': {
@@ -1548,6 +1549,14 @@ const apiMartModelConfigs: Record<
     resolutions: ['2K', '3K', '4K'],
     defaultResolution: '2K',
     maxReferenceImages: 14,
+  },
+  'midjourney-v8.2': {
+    label: 'Midjourney v8.2',
+    resolutions: ['1K', '2K'],
+    defaultResolution: '1K',
+    // Website safety limit, not an upstream Imagine API constraint.
+    maxReferenceImages: 14,
+    midjourneyVersion: '8.2',
   },
 }
 
@@ -1644,7 +1653,43 @@ function apiMartTaskId(source: unknown) {
     const taskId = stringValue(first as Record<string, unknown>, ['task_id', 'taskId', 'id'])
     if (taskId) return taskId
   }
-  return stringValue(root, ['task_id', 'taskId', 'id'])
+  return stringValue(apiMartTaskData(source) || root, ['task_id', 'taskId', 'id'])
+    || stringValue(root, ['task_id', 'taskId', 'id'])
+}
+
+function apiMartMidjourneyImageUrl(source: unknown) {
+  const task = apiMartTaskData(source)
+  if (!task) return undefined
+  const result = task.result && typeof task.result === 'object'
+    ? task.result as Record<string, unknown>
+    : task
+  // The native query returns four cropped images separately from its 2×2 grid.
+  const images = Array.isArray(result.image_urls) ? result.image_urls : []
+  const firstUrl = images.find((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+  if (firstUrl) return firstUrl.trim()
+  if (Array.isArray(result.images)) return apiMartImageUrl(source)
+  return undefined
+}
+
+function apiMartMidjourneySize(size: string, hd: boolean) {
+  let ratio = aspectRatioFromSize(size)
+  const pixels = ratio.match(/^(\d+)x(\d+)$/i)
+  if (pixels) {
+    const width = Number(pixels[1])
+    const height = Number(pixels[2])
+    const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a
+    const divisor = gcd(width, height)
+    ratio = divisor ? `${width / divisor}:${height / divisor}` : ratio
+  }
+  const parts = ratio.match(/^(\d+):(\d+)$/)
+  const width = Number(parts?.[1])
+  const height = Number(parts?.[2])
+  const limit = hd ? 4 : 14
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0
+    || Math.max(width / height, height / width) > limit) {
+    throw new UpstreamHttpError(`Midjourney ${hd ? 'HD' : '标准'}模式需要有效宽高比，最长边与最短边比例不能超过 ${limit}:1。`, 400)
+  }
+  return ratio
 }
 
 function apiMartImageUrl(source: unknown) {
@@ -1710,6 +1755,8 @@ function apiMartTaskStatus(source: unknown) {
 function apiMartTaskError(source: unknown) {
   const task = apiMartTaskData(source)
   if (!task) return undefined
+  const failReason = stringValue(task, ['fail_reason', 'failReason'])
+  if (failReason) return failReason
   if (task.error && typeof task.error === 'object') return knownErrorText(task.error)
   return knownErrorText(task)
 }
@@ -1729,8 +1776,28 @@ async function requestApiMartImage(config: ApiConfig, prompt: string, referenceI
   if (!modelConfig) throw new UpstreamHttpError('当前 API Mart 模型不在网站内置的可选列表中。', 400)
 
   if (referenceImageUrls.length > modelConfig.maxReferenceImages) {
-    throw new UpstreamHttpError(`${modelConfig.label} 最多支持 ${modelConfig.maxReferenceImages} 张参考图。`, 400)
+    throw new UpstreamHttpError(`${modelConfig.label}${modelConfig.midjourneyVersion ? ' 在本网站' : ''}最多支持 ${modelConfig.maxReferenceImages} 张参考图。`, 400)
   }
+  const isMidjourney = Boolean(modelConfig.midjourneyVersion)
+  const resolution = apiMartResolution(config.model, config.imageSize)
+  const generationEndpoint = isMidjourney
+    ? apiMartSiblingEndpoint(config.endpoint.trim(), 'midjourney/generations')
+    : config.endpoint.trim()
+  const payload: Record<string, unknown> = isMidjourney
+    ? {
+        model: 'midjourney',
+        version: modelConfig.midjourneyVersion,
+        prompt,
+        size: apiMartMidjourneySize(config.size, resolution === '2K'),
+        hd: resolution === '2K',
+      }
+    : {
+        model: config.model,
+        prompt,
+        size: aspectRatioFromSize(config.size),
+        resolution,
+        n: 1,
+      }
   // GPT Image 2.5 only accepts public HTTP(S) references, unlike GPT Image 2's base64 support.
   const preparedImages: string[] = []
   if (modelConfig.requiresPublicReferenceUrls) {
@@ -1740,52 +1807,57 @@ async function requestApiMartImage(config: ApiConfig, prompt: string, referenceI
   } else {
     preparedImages.push(...await prepareGrsAiReferenceImages(referenceImageUrls, modelConfig.maxReferenceImages))
   }
-  const payload: Record<string, unknown> = {
-    model: config.model,
-    prompt,
-    size: aspectRatioFromSize(config.size),
-    resolution: apiMartResolution(config.model, config.imageSize),
-    n: 1,
-  }
   if (modelConfig.defaultQuality) payload.quality = modelConfig.defaultQuality
   if (preparedImages.length) payload.image_urls = preparedImages
 
   const headers = { Authorization: `Bearer ${config.apiKey.trim()}` }
   let created: unknown
   try {
-    created = await postJson(config.endpoint.trim(), headers, payload)
+    created = await postJson(generationEndpoint, headers, payload)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'API Mart 请求失败'
-    const detail = `${message}（模型 ${modelConfig.label}，清晰度 ${String(payload.resolution)}，参考图 ${preparedImages.length} 张）`
+    const detail = `${message}（模型 ${modelConfig.label}，清晰度 ${resolution}，参考图 ${preparedImages.length} 张）`
     if (error instanceof UpstreamHttpError) throw new UpstreamHttpError(detail, error.statusCode)
     throw new Error(detail)
   }
 
-  const directUrl = apiMartImageUrl(created)
+  const imageUrlFromResponse = isMidjourney ? apiMartMidjourneyImageUrl : apiMartImageUrl
+  const directUrl = imageUrlFromResponse(created)
   if (directUrl) return { data: [{ url: directUrl }], apimart: created }
 
   const taskId = apiMartTaskId(created)
   if (!taskId) {
+    const reason = apiMartTaskError(created)
+    if (reason) throw new Error(`API Mart 生成失败：${reason}`)
     throw new Error(`API Mart 已响应，但没有返回任务 ID。响应：${compactJson(created)}`)
   }
 
-  const taskEndpoint = apiMartTaskEndpoint(config.endpoint.trim(), taskId)
-  for (let index = 0; index < 120; index += 1) {
-    await new Promise((resolve) => setTimeout(resolve, index === 0 ? 1000 : 2500))
+  const taskEndpoint = isMidjourney
+    ? apiMartSiblingEndpoint(config.endpoint.trim(), `midjourney/${encodeURIComponent(taskId)}`)
+    : apiMartTaskEndpoint(config.endpoint.trim(), taskId)
+  // Relax jobs can queue longer; never resubmit a billed generation while polling.
+  const pollAttempts = isMidjourney ? 240 : 120
+  for (let index = 0; index < pollAttempts; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, isMidjourney ? 3000 : index === 0 ? 1000 : 2500))
     const result = await getJson(taskEndpoint, headers)
-    const imageUrl = apiMartImageUrl(result)
-    if (imageUrl) return { data: [{ url: imageUrl }], apimart: result }
-
     const status = apiMartTaskStatus(result)
-    if (status === 'failed' || status === 'cancelled' || status === 'canceled') {
+    if (status === 'failed' || status === 'failure' || status === 'cancelled' || status === 'canceled') {
       throw new Error(`API Mart 生成失败：${apiMartTaskError(result) || status}`)
     }
-    if (status === 'completed') {
+    if (isMidjourney && status === 'modal') {
+      throw new Error(`API Mart Midjourney 任务需要额外参数（任务 ${taskId}）：${apiMartTaskError(result) || '请检查提示词中的操作参数。'}`)
+    }
+    const completed = status === 'completed' || status === 'success'
+    const imageUrl = imageUrlFromResponse(result)
+    if (imageUrl && (!isMidjourney || completed)) return { data: [{ url: imageUrl }], apimart: result }
+    if (completed) {
       throw new Error('API Mart 任务已完成，但响应中没有找到图片地址。')
     }
   }
 
-  throw new Error(`API Mart 生成超时（任务 ${taskId}），请稍后重新生成。`)
+  throw new Error(isMidjourney
+    ? `API Mart Midjourney 等待超时（任务 ${taskId}），任务可能仍在排队，请先在 API Mart 查看任务状态，避免重复提交扣费。`
+    : `API Mart 生成超时（任务 ${taskId}），请稍后重新生成。`)
 }
 
 async function uploadApiMartReferenceImage(

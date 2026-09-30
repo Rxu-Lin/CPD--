@@ -24,6 +24,7 @@ export default function SketchStudio({ initialDocument, defaultModel, defaultRes
   const docRef = useRef(doc)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
+  const brushCursorRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const imageCacheRef = useRef(new Map<string, Promise<HTMLImageElement>>())
   const undoRef = useRef<SketchDocument[]>([])
@@ -125,6 +126,23 @@ export default function SketchStudio({ initialDocument, defaultModel, defaultRes
     const rect = event.currentTarget.getBoundingClientRect()
     return { x: (event.clientX - rect.left) * doc.width / rect.width, y: (event.clientY - rect.top) * doc.height / rect.height }
   }
+  function moveBrushCursor(event: ReactPointerEvent<HTMLCanvasElement>) {
+    const cursor = brushCursorRef.current
+    const stage = stageRef.current
+    if (!cursor || !stage) return
+    const canvasBounds = event.currentTarget.getBoundingClientRect()
+    if (event.clientX < canvasBounds.left || event.clientX > canvasBounds.right || event.clientY < canvasBounds.top || event.clientY > canvasBounds.bottom) {
+      cursor.hidden = true
+      return
+    }
+    const bounds = stage.getBoundingClientRect()
+    cursor.style.left = `${event.clientX - bounds.left}px`
+    cursor.style.top = `${event.clientY - bounds.top}px`
+    cursor.hidden = false
+  }
+  function hideBrushCursor() {
+    if (brushCursorRef.current) brushCursorRef.current.hidden = true
+  }
   function pointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (busy || modelEditor || (event.button !== 0 && event.button !== 1)) return
     event.preventDefault()
@@ -165,6 +183,7 @@ export default function SketchStudio({ initialDocument, defaultModel, defaultRes
     setSelectedId(null)
   }
   function pointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
+    moveBrushCursor(event)
     const gesture = gestureRef.current
     if (!gesture) return
     if (gesture.kind === 'pan') {
@@ -267,8 +286,9 @@ export default function SketchStudio({ initialDocument, defaultModel, defaultRes
             </div>
             <div className="sketch-stage" ref={stageRef} onWheel={event => { if (!busy) setZoom(current => Math.max(0.25, Math.min(4, current * (event.deltaY > 0 ? 0.9 : 1.1)))) }}>
               <div className="sketch-paper" style={{ width: doc.width, height: doc.height, transform: `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px) scale(${Math.max(0.05, fit * zoom)})` }}>
-                <canvas ref={canvasRef} width={doc.width} height={doc.height} aria-label="手绘绘制区域" style={{ cursor: tool === 'pan' ? 'grab' : tool === 'select' ? 'default' : 'crosshair' }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onContextMenu={event => event.preventDefault()} />
+                <canvas ref={canvasRef} width={doc.width} height={doc.height} aria-label="手绘绘制区域" style={{ cursor: tool === 'pan' ? 'grab' : tool === 'select' ? 'default' : tool === 'pen' || tool === 'eraser' ? 'none' : 'crosshair' }} onPointerEnter={moveBrushCursor} onPointerLeave={hideBrushCursor} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={event => { hideBrushCursor(); pointerUp(event) }} onContextMenu={event => event.preventDefault()} />
               </div>
+              {(tool === 'pen' || tool === 'eraser') && <div ref={brushCursorRef} className={`sketch-brush-cursor ${tool}`} aria-hidden="true" style={{ width: Math.max(2, brushSize * Math.max(0.05, fit * zoom)), height: Math.max(2, brushSize * Math.max(0.05, fit * zoom)) }} hidden />}
               <span className="sketch-stage-label">{doc.width} × {doc.height} · {active?.name || '请选择图层'}</span>
               <div className="sketch-zoom"><button type="button" aria-label="缩小手绘画板" onClick={() => setZoom(value => Math.max(0.25, value / 1.2))}><ZoomOut size={16} /></button><button type="button" title="适应窗口" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }) }}>{Math.round(zoom * 100)}%</button><button type="button" aria-label="放大手绘画板" onClick={() => setZoom(value => Math.min(4, value * 1.2))}><ZoomIn size={16} /></button></div>
             </div>
